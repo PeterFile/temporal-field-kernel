@@ -1,2 +1,6 @@
-# Embedded Datalog-like MVP rules. Syntax is provisional.
-# requires_confirmation(A) :- action(A), high_irreversibility(A), high_externality(A), uncertain(A).
+# Embedded Datalog-like MVP rules. Syntax is documentation-only for now.
+# The Rust API in tfk-rules builds these rules programmatically.
+
+active(C) :- continuation(C), continuation_status(C, "open").
+needs_review(C) :- active(C), risk_level(C, "high").
+risk_marker(C, "review") :- needs_review(C).

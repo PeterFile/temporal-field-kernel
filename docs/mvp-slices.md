@@ -17,7 +17,7 @@
 
 - MCP thin wrapper
 - CLI wrapper session capture
-- embedded Datalog-like rules
+- embedded Datalog-like fixed-point rules
 - TemporalBench fixture replay
 
 ## v0.3
