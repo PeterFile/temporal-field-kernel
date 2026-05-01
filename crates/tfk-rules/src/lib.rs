@@ -177,7 +177,7 @@ pub fn core_rules() -> Vec<Rule> {
                 Atom::new("continuation", [Term::var("continuation")]),
                 Atom::new(
                     "continuation_status",
-                    [Term::var("continuation"), Term::lit("open")],
+                    [Term::var("continuation"), Term::lit("active")],
                 ),
             ],
         ),
