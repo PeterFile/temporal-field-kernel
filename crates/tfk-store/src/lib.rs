@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tfk_protocol::RawEventInput;
+use tfk_protocol::{ContinuationInput, ContinuationStatus, RawEventInput, StoredContinuation};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -179,6 +179,79 @@ impl Store {
         }))
     }
 
+    pub fn create_continuation(&self, input: &ContinuationInput) -> Result<StoredContinuation> {
+        let id = format!("cont_{}", Uuid::new_v4().simple());
+        let now = now_rfc3339()?;
+        let status = continuation_status_to_string(input.status)?;
+
+        self.conn.execute(
+            "INSERT INTO continuations (
+                id, title, summary, status, parent_id, raw_event_id, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                input.title,
+                input.summary,
+                status,
+                input.parent_id,
+                input.raw_event_id,
+                now,
+                now,
+            ],
+        )?;
+
+        Ok(self
+            .get_continuation(&id)?
+            .expect("inserted continuation must be readable"))
+    }
+
+    pub fn list_continuations(&self) -> Result<Vec<StoredContinuation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, summary, status, parent_id, raw_event_id, created_at, updated_at
+             FROM continuations
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([], row_to_continuation_fields)?;
+        let mut continuations = Vec::new();
+        for row in rows {
+            continuations.push(row?.into_stored()?);
+        }
+        Ok(continuations)
+    }
+
+    pub fn get_continuation(&self, id: &str) -> Result<Option<StoredContinuation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, summary, status, parent_id, raw_event_id, created_at, updated_at
+             FROM continuations WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        row_to_continuation_fields(row)?.into_stored().map(Some)
+    }
+
+    pub fn search_continuations(&self, query: &str) -> Result<Vec<String>> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let pattern = like_literal_pattern(query);
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM continuations
+             WHERE title LIKE ?1 ESCAPE '\\'
+                OR summary LIKE ?1 ESCAPE '\\'
+             ORDER BY updated_at, id
+             LIMIT 20",
+        )?;
+        let rows = stmt.query_map(params![pattern], |row| row.get::<_, String>(0))?;
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row?);
+        }
+        Ok(hits)
+    }
+
     pub fn search_raw_events(&self, query: &str) -> Result<Vec<String>> {
         if query.trim().is_empty() {
             return Ok(Vec::new());
@@ -228,6 +301,55 @@ impl Store {
         }
         Ok(hits)
     }
+}
+
+struct ContinuationFields {
+    id: String,
+    title: String,
+    summary: String,
+    status: String,
+    parent_id: Option<String>,
+    raw_event_id: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl ContinuationFields {
+    fn into_stored(self) -> Result<StoredContinuation> {
+        Ok(StoredContinuation {
+            id: self.id,
+            title: self.title,
+            summary: self.summary,
+            status: continuation_status_from_string(&self.status)?,
+            parent_id: self.parent_id,
+            raw_event_id: self.raw_event_id,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+fn row_to_continuation_fields(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContinuationFields> {
+    Ok(ContinuationFields {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        summary: row.get(2)?,
+        status: row.get(3)?,
+        parent_id: row.get(4)?,
+        raw_event_id: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn continuation_status_to_string(status: ContinuationStatus) -> Result<String> {
+    Ok(serde_json::to_value(status)?.as_str().unwrap().to_string())
+}
+
+fn continuation_status_from_string(status: &str) -> Result<ContinuationStatus> {
+    Ok(serde_json::from_value(serde_json::Value::String(
+        status.to_string(),
+    ))?)
 }
 
 fn fts_literal_query(query: &str) -> String {
@@ -358,6 +480,16 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS raw_events_fts
         USING fts5(event_id UNINDEXED, content, tokenize='unicode61');
+        CREATE TABLE IF NOT EXISTS continuations (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          status TEXT NOT NULL,
+          parent_id TEXT,
+          raw_event_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
         "#,
     )?;
     Ok(())

@@ -4,7 +4,10 @@ use axum::{
 };
 use tempfile::tempdir;
 use tfk_core::{PreflightResult, PreflightSignals};
-use tfk_protocol::{ApiEnvelope, EventSource, LensCard, LensRequest, RawEventInput};
+use tfk_protocol::{
+    ApiEnvelope, ContinuationInput, ContinuationStatus, EventSource, LensCard, LensRequest,
+    RawEventInput, StoredContinuation,
+};
 use tfk_store::{Store, StoredRawEvent};
 use tower::ServiceExt;
 
@@ -76,6 +79,108 @@ async fn preflight_endpoint_returns_confirmation_decision() {
     assert!(result.risk_product > result.threshold);
 }
 
+#[tokio::test]
+async fn continuation_endpoints_create_list_and_read_from_store() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let input = ContinuationInput {
+        title: "项目状态机不是目标".to_string(),
+        summary: "把这个判断变成可恢复的 continuation".to_string(),
+        status: ContinuationStatus::Active,
+        parent_id: None,
+        raw_event_id: None,
+    };
+
+    let create_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/continuations", &input))
+        .await
+        .unwrap();
+
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let create_envelope: ApiEnvelope<StoredContinuation> = read_json(create_response).await;
+    assert!(create_envelope.ok);
+    let created = create_envelope.data.unwrap();
+    assert!(created.id.starts_with("cont_"));
+    assert_eq!(created.title, input.title);
+    assert_eq!(created.status, ContinuationStatus::Active);
+
+    let list_response = app
+        .clone()
+        .oneshot(empty_request("GET", "/v1/continuations"))
+        .await
+        .unwrap();
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_envelope: ApiEnvelope<Vec<StoredContinuation>> = read_json(list_response).await;
+    assert!(list_envelope.ok);
+    assert_eq!(list_envelope.data.unwrap(), vec![created.clone()]);
+
+    let get_response = app
+        .oneshot(empty_request(
+            "GET",
+            &format!("/v1/continuations/{}", created.id),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_envelope: ApiEnvelope<StoredContinuation> = read_json(get_response).await;
+    assert!(get_envelope.ok);
+    assert_eq!(get_envelope.data.unwrap(), created);
+}
+
+#[tokio::test]
+async fn lens_recalls_matching_continuation_before_raw_event_fallback() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let input = ContinuationInput {
+        title: "项目状态机不是目标".to_string(),
+        summary: "summary also participates in continuation recall".to_string(),
+        status: ContinuationStatus::Active,
+        parent_id: None,
+        raw_event_id: None,
+    };
+    let create_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/continuations", &input))
+        .await
+        .unwrap();
+    let created: ApiEnvelope<StoredContinuation> = read_json(create_response).await;
+    let created = created.data.unwrap();
+    let raw = RawEventInput::new_text(
+        "s1",
+        "cli",
+        EventSource::User,
+        "raw event also says 项目状态机",
+    );
+    app.clone()
+        .oneshot(json_request("POST", "/v1/observe", &raw))
+        .await
+        .unwrap();
+
+    let lens = LensRequest {
+        query: "项目状态机".to_string(),
+        horizon: Vec::new(),
+        perspective: Vec::new(),
+    };
+    let lens_response = app
+        .oneshot(json_request("POST", "/v1/lens", &lens))
+        .await
+        .unwrap();
+
+    assert_eq!(lens_response.status(), StatusCode::OK);
+    let lens_envelope: ApiEnvelope<LensCard> = read_json(lens_response).await;
+    assert!(lens_envelope.ok);
+    assert_eq!(lens_envelope.provenance[0].kind, "continuation");
+    assert_eq!(lens_envelope.provenance[0].id, created.id);
+    let card = lens_envelope.data.unwrap();
+    assert_eq!(card.stance, "continuation_recall");
+    assert!(card.why_now.contains("1 matching continuation"));
+}
+
 fn open_test_store(root: &std::path::Path) -> Store {
     let data_dir = root.join("data");
     Store::open(data_dir.join("tfk.db"), data_dir.join("archive")).unwrap()
@@ -87,6 +192,14 @@ fn json_request<T: serde::Serialize>(method: &str, uri: &str, body: &T) -> Reque
         .uri(uri)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .unwrap()
+}
+
+fn empty_request(method: &str, uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
         .unwrap()
 }
 

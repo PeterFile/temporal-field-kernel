@@ -51,10 +51,19 @@ pub async fn request_json_over_uds(
     path: &str,
     body: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
+    request_over_uds(socket_path, "POST", path, body).await
+}
+
+pub async fn request_over_uds(
+    socket_path: &Path,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> anyhow::Result<Vec<u8>> {
     let mut stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("failed to connect to {}", socket_path.display()))?;
-    let request = build_http_request("POST", path, body);
+    let request = build_http_request(method, path, body);
     stream
         .write_all(&request)
         .await

@@ -113,6 +113,27 @@ pub enum ContinuationStatus {
     Retired,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContinuationInput {
+    pub title: String,
+    pub summary: String,
+    pub status: ContinuationStatus,
+    pub parent_id: Option<String>,
+    pub raw_event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StoredContinuation {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub status: ContinuationStatus,
+    pub parent_id: Option<String>,
+    pub raw_event_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LensRequest {
     pub query: String,

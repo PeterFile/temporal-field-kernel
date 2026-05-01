@@ -4,6 +4,9 @@ Canonical local endpoints:
 
 ```text
 POST /v1/observe
+POST /v1/continuations
+GET  /v1/continuations
+GET  /v1/continuations/:id
 POST /v1/lens
 POST /v1/forecast
 POST /v1/preflight
@@ -45,6 +48,32 @@ Minimal body:
 
 Returns `ApiEnvelope<StoredRawEvent>`.
 
+### POST /v1/continuations
+
+Accepts `ContinuationInput` and stores a minimal continuation graph node in SQLite.
+
+Minimal body:
+
+```json
+{
+  "title": "项目状态机不是目标",
+  "summary": "继续跟踪这个判断",
+  "status": "active",
+  "parent_id": null,
+  "raw_event_id": null
+}
+```
+
+Returns `ApiEnvelope<StoredContinuation>`.
+
+### GET /v1/continuations
+
+Returns `ApiEnvelope<Vec<StoredContinuation>>` ordered by creation time.
+
+### GET /v1/continuations/:id
+
+Returns `ApiEnvelope<StoredContinuation>` for one stored continuation, or a 404 envelope.
+
 ### POST /v1/preflight
 
 Accepts `PreflightSignals`:
@@ -76,4 +105,4 @@ Accepts `LensRequest`:
 }
 ```
 
-Current behavior is intentionally minimal: search raw events and return a `LensCard` grounded by matching `raw_event` provenance. It is not a continuation graph yet.
+Current behavior is intentionally minimal: search continuation title/summary first and return a `LensCard` grounded by matching `continuation` provenance. If no continuation matches, it falls back to raw event recall with `raw_event` provenance.
