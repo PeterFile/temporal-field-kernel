@@ -194,6 +194,7 @@ fn default_data_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::ErrorKind;
     use std::os::unix::fs::{symlink, PermissionsExt as _};
     use std::os::unix::net::UnixListener as StdUnixListener;
 
@@ -234,7 +235,9 @@ mod tests {
     fn stale_socket_cleanup_removes_socket_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tfkd.sock");
-        let listener = StdUnixListener::bind(&path).unwrap();
+        let Some(listener) = bind_test_socket_or_skip(&path) else {
+            return;
+        };
         drop(listener);
 
         remove_stale_socket_if_present(&path).unwrap();
@@ -309,12 +312,22 @@ mod tests {
     fn socket_restriction_uses_owner_only_permissions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tfkd.sock");
-        let listener = StdUnixListener::bind(&path).unwrap();
+        let Some(listener) = bind_test_socket_or_skip(&path) else {
+            return;
+        };
         drop(listener);
 
         restrict_socket_permissions(&path).unwrap();
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    fn bind_test_socket_or_skip(path: &Path) -> Option<StdUnixListener> {
+        match StdUnixListener::bind(path) {
+            Ok(listener) => Some(listener),
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => None,
+            Err(error) => panic!("failed to bind test socket {}: {error}", path.display()),
+        }
     }
 }

@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
+use anyhow::bail;
 use clap::{Parser, Subcommand};
-use tfk_protocol::{EventSource, LensRequest, RawEventInput};
+use tfk_protocol::{
+    ContinuationInput, ContinuationStatus, EventSource, LensRequest, RawEventInput,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "tfk", about = "Temporal Field Kernel CLI")]
@@ -27,6 +30,29 @@ enum Command {
     },
     /// Request a minimal lens card from the local tfkd daemon.
     Lens { query: String },
+    /// Create or list continuations through the local tfkd daemon.
+    Continuation {
+        #[command(subcommand)]
+        command: ContinuationCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ContinuationCommand {
+    /// Create an active continuation.
+    Create {
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        parent_id: Option<String>,
+        #[arg(long)]
+        raw_event_id: Option<String>,
+        title: String,
+    },
+    /// List stored continuations.
+    List,
+    /// Get one stored continuation.
+    Get { id: String },
 }
 
 #[tokio::main]
@@ -60,6 +86,38 @@ async fn main() -> anyhow::Result<()> {
             let response = tfk_cli::request_json_over_uds(&socket_path, "/v1/lens", &body).await?;
             print_json(&response)?;
         }
+        Command::Continuation { command } => match command {
+            ContinuationCommand::Create {
+                title,
+                summary,
+                parent_id,
+                raw_event_id,
+            } => {
+                let input = ContinuationInput {
+                    title,
+                    summary,
+                    status: ContinuationStatus::Active,
+                    parent_id,
+                    raw_event_id,
+                };
+                let body = serde_json::to_vec(&input)?;
+                let response =
+                    tfk_cli::request_json_over_uds(&socket_path, "/v1/continuations", &body)
+                        .await?;
+                print_json(&response)?;
+            }
+            ContinuationCommand::List => {
+                let response =
+                    tfk_cli::request_over_uds(&socket_path, "GET", "/v1/continuations", b"")
+                        .await?;
+                print_json(&response)?;
+            }
+            ContinuationCommand::Get { id } => {
+                let path = continuation_get_path(&id)?;
+                let response = tfk_cli::request_over_uds(&socket_path, "GET", &path, b"").await?;
+                print_json(&response)?;
+            }
+        },
     }
     Ok(())
 }
@@ -76,4 +134,87 @@ fn default_socket_path() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("tfk")
         .join("tfkd.sock")
+}
+
+fn continuation_get_path(id: &str) -> anyhow::Result<String> {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        bail!("invalid continuation id");
+    }
+    Ok(format!("/v1/continuations/{id}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_continuation_create_command() {
+        let cli = Cli::parse_from([
+            "tfk",
+            "--uds",
+            "/tmp/tfk.sock",
+            "continuation",
+            "create",
+            "--summary",
+            "继续跟踪",
+            "--parent-id",
+            "cont_parent",
+            "--raw-event-id",
+            "evt_source",
+            "项目状态机不是目标",
+        ]);
+
+        match cli.command {
+            Command::Continuation {
+                command:
+                    ContinuationCommand::Create {
+                        title,
+                        summary,
+                        parent_id,
+                        raw_event_id,
+                    },
+            } => {
+                assert_eq!(title, "项目状态机不是目标");
+                assert_eq!(summary, "继续跟踪");
+                assert_eq!(parent_id.as_deref(), Some("cont_parent"));
+                assert_eq!(raw_event_id.as_deref(), Some("evt_source"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_continuation_list_command() {
+        let cli = Cli::parse_from(["tfk", "continuation", "list"]);
+
+        assert!(matches!(
+            cli.command,
+            Command::Continuation {
+                command: ContinuationCommand::List
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_continuation_get_command() {
+        let cli = Cli::parse_from(["tfk", "continuation", "get", "cont_abc123"]);
+
+        match cli.command {
+            Command::Continuation {
+                command: ContinuationCommand::Get { id },
+            } => assert_eq!(id, "cont_abc123"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continuation_get_path_rejects_request_line_injection() {
+        let error = continuation_get_path("cont_1\r\nX-Bad: true").unwrap_err();
+
+        assert!(error.to_string().contains("invalid continuation id"));
+    }
 }

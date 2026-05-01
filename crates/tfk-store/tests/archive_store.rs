@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 
 use tempfile::tempdir;
-use tfk_protocol::{EventSource, RawEventInput};
+use tfk_protocol::{ContinuationInput, ContinuationStatus, EventSource, RawEventInput};
 use tfk_store::Store;
 
 #[test]
@@ -127,6 +127,73 @@ fn store_rejects_existing_public_data_directory() {
     let error = Store::open(data_dir.join("tfk.db"), data_dir.join("archive")).unwrap_err();
 
     assert!(error.to_string().contains("refusing non-private directory"));
+}
+
+#[test]
+fn continuation_create_list_get_persists_in_sqlite() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let db_path = data_dir.join("tfk.db");
+    let archive_dir = data_dir.join("archive");
+    let created_id = {
+        let store = Store::open(&db_path, &archive_dir).unwrap();
+        let created = store
+            .create_continuation(&ContinuationInput {
+                title: "项目状态机不是目标".to_string(),
+                summary: "继续跟踪这个判断".to_string(),
+                status: ContinuationStatus::Active,
+                parent_id: Some("cont_parent".to_string()),
+                raw_event_id: Some("evt_source".to_string()),
+            })
+            .unwrap();
+
+        assert!(created.id.starts_with("cont_"));
+        assert_eq!(created.title, "项目状态机不是目标");
+        assert_eq!(created.summary, "继续跟踪这个判断");
+        assert_eq!(created.status, ContinuationStatus::Active);
+        assert_eq!(created.parent_id.as_deref(), Some("cont_parent"));
+        assert_eq!(created.raw_event_id.as_deref(), Some("evt_source"));
+        assert_eq!(created.created_at, created.updated_at);
+        created.id
+    };
+
+    let reopened = Store::open(&db_path, &archive_dir).unwrap();
+    let loaded = reopened.get_continuation(&created_id).unwrap().unwrap();
+    assert_eq!(loaded.id, created_id);
+
+    let listed = reopened.list_continuations().unwrap();
+    assert_eq!(listed, vec![loaded]);
+}
+
+#[test]
+fn continuation_search_matches_title_and_summary_as_literal_text() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let target = store
+        .create_continuation(&ContinuationInput {
+            title: "状态机 100%_literal".to_string(),
+            summary: "继续保存 continuation graph provenance".to_string(),
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    let other = store
+        .create_continuation(&ContinuationInput {
+            title: "状态机 100xxliteral".to_string(),
+            summary: "unrelated".to_string(),
+            status: ContinuationStatus::Deferred,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+
+    let title_hits = store.search_continuations("100%_literal").unwrap();
+    assert_eq!(title_hits, vec![target.id.clone()]);
+
+    let summary_hits = store.search_continuations("continuation graph").unwrap();
+    assert_eq!(summary_hits, vec![target.id]);
+    assert!(!summary_hits.contains(&other.id));
 }
 
 fn open_test_store(root: &std::path::Path) -> Store {

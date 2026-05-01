@@ -1,14 +1,17 @@
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
 use tfk_core::{PreflightScorer, PreflightSignals};
-use tfk_protocol::{ApiEnvelope, LensCard, LensRequest, ProvenanceRef, RawEventInput};
+use tfk_protocol::{
+    ApiEnvelope, ContinuationInput, LensCard, LensRequest, ProvenanceRef, RawEventInput,
+    StoredContinuation,
+};
 use tfk_store::{Store, StoredRawEvent};
 
 #[derive(Clone)]
@@ -38,6 +41,11 @@ pub fn router_with_state(state: ApiState) -> Router {
     Router::new()
         .route("/healthz", get(health_handler))
         .route("/v1/observe", post(observe_handler))
+        .route(
+            "/v1/continuations",
+            post(create_continuation_handler).get(list_continuations_handler),
+        )
+        .route("/v1/continuations/:id", get(get_continuation_handler))
         .route("/v1/preflight", post(preflight_handler))
         .route("/v1/lens", post(lens_handler))
         .with_state(state)
@@ -72,6 +80,60 @@ async fn observe_handler(
     )))
 }
 
+async fn create_continuation_handler(
+    State(state): State<ApiState>,
+    Json(input): Json<ContinuationInput>,
+) -> Result<Json<ApiEnvelope<StoredContinuation>>, ApiError> {
+    let stored = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .create_continuation(&input)
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-continuation-create",
+        "local-continuation-create",
+        stored,
+    )))
+}
+
+async fn list_continuations_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<ApiEnvelope<Vec<StoredContinuation>>>, ApiError> {
+    let continuations = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .list_continuations()
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-continuation-list",
+        "local-continuation-list",
+        continuations,
+    )))
+}
+
+async fn get_continuation_handler(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiEnvelope<StoredContinuation>>, ApiError> {
+    let continuation = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .get_continuation(&id)
+        .map_err(|error| internal_error(error.to_string()))?
+        .ok_or_else(|| not_found_error(format!("continuation not found: {id}")))?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-continuation-get",
+        "local-continuation-get",
+        continuation,
+    )))
+}
+
 async fn preflight_handler(
     State(state): State<ApiState>,
     Json(signals): Json<PreflightSignals>,
@@ -87,41 +149,82 @@ async fn lens_handler(
     State(state): State<ApiState>,
     Json(request): Json<LensRequest>,
 ) -> Result<Json<ApiEnvelope<LensCard>>, ApiError> {
-    let events = {
+    let (continuations, events) = {
         let store = state
             .store
             .lock()
             .map_err(|_| internal_error("store lock poisoned"))?;
-        let hits = store
-            .search_raw_events(&request.query)
+        let continuation_hits = store
+            .search_continuations(&request.query)
             .map_err(|error| internal_error(error.to_string()))?;
-        let mut events = Vec::new();
-        for id in hits {
-            if let Some(event) = store
-                .get_raw_event(&id)
+        let mut continuations = Vec::new();
+        for id in continuation_hits {
+            if let Some(continuation) = store
+                .get_continuation(&id)
                 .map_err(|error| internal_error(error.to_string()))?
             {
-                events.push(event);
+                continuations.push(continuation);
             }
         }
-        events
+        if !continuations.is_empty() {
+            (continuations, Vec::new())
+        } else {
+            let hits = store
+                .search_raw_events(&request.query)
+                .map_err(|error| internal_error(error.to_string()))?;
+            let mut events = Vec::new();
+            for id in hits {
+                if let Some(event) = store
+                    .get_raw_event(&id)
+                    .map_err(|error| internal_error(error.to_string()))?
+                {
+                    events.push(event);
+                }
+            }
+            (continuations, events)
+        }
     };
 
-    let card = lens_card(&request, events.len());
+    let card = lens_card(&request, continuations.len(), events.len());
     let mut envelope = ApiEnvelope::ok("local-lens", "local-lens", card);
-    envelope.provenance = events
-        .into_iter()
-        .map(|event| ProvenanceRef {
-            kind: "raw_event".to_string(),
-            id: event.id,
-        })
-        .collect();
+    envelope.provenance = if continuations.is_empty() {
+        events
+            .into_iter()
+            .map(|event| ProvenanceRef {
+                kind: "raw_event".to_string(),
+                id: event.id,
+            })
+            .collect()
+    } else {
+        continuations
+            .into_iter()
+            .map(|continuation| ProvenanceRef {
+                kind: "continuation".to_string(),
+                id: continuation.id,
+            })
+            .collect()
+    };
 
     Ok(Json(envelope))
 }
 
-fn lens_card(request: &LensRequest, hit_count: usize) -> LensCard {
-    if hit_count == 0 {
+fn lens_card(request: &LensRequest, continuation_count: usize, raw_event_count: usize) -> LensCard {
+    if continuation_count > 0 {
+        return LensCard {
+            stance: "continuation_recall".to_string(),
+            why_now: format!(
+                "{continuation_count} matching continuation(s) found for query: {}",
+                request.query
+            ),
+            avoid: vec![
+                "do not infer closure from recall alone".to_string(),
+                "do not expand this into vector search or full Datalog".to_string(),
+            ],
+            open_questions: vec!["what is the next concrete observation or action?".to_string()],
+        };
+    }
+
+    if raw_event_count == 0 {
         return LensCard {
             stance: "scaffold".to_string(),
             why_now: format!("no matching raw events found for query: {}", request.query),
@@ -136,7 +239,7 @@ fn lens_card(request: &LensRequest, hit_count: usize) -> LensCard {
     LensCard {
         stance: "grounded_recall".to_string(),
         why_now: format!(
-            "{hit_count} matching raw event(s) found for query: {}",
+            "{raw_event_count} matching raw event(s) found for query: {}",
             request.query
         ),
         avoid: vec![
@@ -154,6 +257,20 @@ type ApiError = (StatusCode, Json<ApiEnvelope<Value>>);
 fn internal_error(message: impl Into<String>) -> ApiError {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiEnvelope {
+            request_id: "local-error".to_string(),
+            trace_id: "local-error".to_string(),
+            ok: false,
+            data: None,
+            warnings: vec![message.into()],
+            provenance: Vec::new(),
+        }),
+    )
+}
+
+fn not_found_error(message: impl Into<String>) -> ApiError {
+    (
+        StatusCode::NOT_FOUND,
         Json(ApiEnvelope {
             request_id: "local-error".to_string(),
             trace_id: "local-error".to_string(),

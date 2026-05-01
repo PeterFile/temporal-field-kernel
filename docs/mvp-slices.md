@@ -15,6 +15,8 @@
 
 ## v0.2
 
+- minimal continuation graph protocol/store/API/CLI
+- continuation-aware `/v1/lens` recall with raw event fallback
 - MCP thin wrapper
 - CLI wrapper session capture
 - embedded Datalog-like fixed-point rules
