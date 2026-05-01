@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tfk_protocol::{ContinuationInput, ContinuationStatus, RawEventInput, StoredContinuation};
+use tfk_protocol::{
+    ContinuationInput, ContinuationStatus, ContinuationType, RawEventInput, StoredContinuation,
+};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -183,15 +185,17 @@ impl Store {
         let id = format!("cont_{}", Uuid::new_v4().simple());
         let now = now_rfc3339()?;
         let status = continuation_status_to_string(input.status)?;
+        let continuation_type = continuation_type_to_string(input.continuation_type)?;
 
         self.conn.execute(
             "INSERT INTO continuations (
-                id, title, summary, status, parent_id, raw_event_id, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                id, title, summary, continuation_type, status, parent_id, raw_event_id, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id,
                 input.title,
                 input.summary,
+                continuation_type,
                 status,
                 input.parent_id,
                 input.raw_event_id,
@@ -207,7 +211,7 @@ impl Store {
 
     pub fn list_continuations(&self) -> Result<Vec<StoredContinuation>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, summary, status, parent_id, raw_event_id, created_at, updated_at
+            "SELECT id, title, summary, continuation_type, status, parent_id, raw_event_id, created_at, updated_at
              FROM continuations
              ORDER BY created_at, id",
         )?;
@@ -221,7 +225,7 @@ impl Store {
 
     pub fn get_continuation(&self, id: &str) -> Result<Option<StoredContinuation>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, summary, status, parent_id, raw_event_id, created_at, updated_at
+            "SELECT id, title, summary, continuation_type, status, parent_id, raw_event_id, created_at, updated_at
              FROM continuations WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -307,6 +311,7 @@ struct ContinuationFields {
     id: String,
     title: String,
     summary: String,
+    continuation_type: String,
     status: String,
     parent_id: Option<String>,
     raw_event_id: Option<String>,
@@ -320,6 +325,7 @@ impl ContinuationFields {
             id: self.id,
             title: self.title,
             summary: self.summary,
+            continuation_type: continuation_type_from_string(&self.continuation_type)?,
             status: continuation_status_from_string(&self.status)?,
             parent_id: self.parent_id,
             raw_event_id: self.raw_event_id,
@@ -334,12 +340,26 @@ fn row_to_continuation_fields(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conti
         id: row.get(0)?,
         title: row.get(1)?,
         summary: row.get(2)?,
-        status: row.get(3)?,
-        parent_id: row.get(4)?,
-        raw_event_id: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        continuation_type: row.get(3)?,
+        status: row.get(4)?,
+        parent_id: row.get(5)?,
+        raw_event_id: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
+}
+
+fn continuation_type_to_string(continuation_type: ContinuationType) -> Result<String> {
+    Ok(serde_json::to_value(continuation_type)?
+        .as_str()
+        .unwrap()
+        .to_string())
+}
+
+fn continuation_type_from_string(continuation_type: &str) -> Result<ContinuationType> {
+    Ok(serde_json::from_value(serde_json::Value::String(
+        continuation_type.to_string(),
+    ))?)
 }
 
 fn continuation_status_to_string(status: ContinuationStatus) -> Result<String> {
@@ -484,6 +504,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
           id TEXT PRIMARY KEY,
           title TEXT NOT NULL,
           summary TEXT NOT NULL,
+          continuation_type TEXT NOT NULL DEFAULT 'narrative',
           status TEXT NOT NULL,
           parent_id TEXT,
           raw_event_id TEXT,
@@ -492,7 +513,25 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         );
         "#,
     )?;
+    if !continuations_column_exists(conn, "continuation_type")? {
+        conn.execute(
+            "ALTER TABLE continuations
+             ADD COLUMN continuation_type TEXT NOT NULL DEFAULT 'narrative'",
+            [],
+        )?;
+    }
     Ok(())
+}
+
+fn continuations_column_exists(conn: &Connection, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(continuations)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn now_rfc3339() -> Result<String> {

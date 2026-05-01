@@ -5,8 +5,8 @@ use axum::{
 use tempfile::tempdir;
 use tfk_core::{PreflightResult, PreflightSignals};
 use tfk_protocol::{
-    ApiEnvelope, ContinuationInput, ContinuationStatus, EventSource, LensCard, LensRequest,
-    RawEventInput, StoredContinuation,
+    ApiEnvelope, ContinuationInput, ContinuationStatus, ContinuationType, EventSource, LensCard,
+    LensRequest, RawEventInput, StoredContinuation,
 };
 use tfk_store::{Store, StoredRawEvent};
 use tower::ServiceExt;
@@ -87,6 +87,7 @@ async fn continuation_endpoints_create_list_and_read_from_store() {
     let input = ContinuationInput {
         title: "项目状态机不是目标".to_string(),
         summary: "把这个判断变成可恢复的 continuation".to_string(),
+        continuation_type: ContinuationType::Obligation,
         status: ContinuationStatus::Active,
         parent_id: None,
         raw_event_id: None,
@@ -104,6 +105,7 @@ async fn continuation_endpoints_create_list_and_read_from_store() {
     let created = create_envelope.data.unwrap();
     assert!(created.id.starts_with("cont_"));
     assert_eq!(created.title, input.title);
+    assert_eq!(created.continuation_type, ContinuationType::Obligation);
     assert_eq!(created.status, ContinuationStatus::Active);
 
     let list_response = app
@@ -132,6 +134,34 @@ async fn continuation_endpoints_create_list_and_read_from_store() {
 }
 
 #[tokio::test]
+async fn continuation_endpoint_accepts_legacy_body_without_type() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let input = serde_json::json!({
+        "title": "项目状态机不是目标",
+        "summary": "继续跟踪这个判断",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+    });
+
+    let create_response = app
+        .oneshot(json_request("POST", "/v1/continuations", &input))
+        .await
+        .unwrap();
+
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let create_envelope: ApiEnvelope<StoredContinuation> = read_json(create_response).await;
+    assert!(create_envelope.ok);
+    let created = create_envelope.data.unwrap();
+    assert_eq!(created.continuation_type, ContinuationType::Narrative);
+
+    let json = serde_json::to_value(created).unwrap();
+    assert_eq!(json["continuation_type"], "narrative");
+}
+
+#[tokio::test]
 async fn lens_recalls_matching_continuation_before_raw_event_fallback() {
     let tmp = tempdir().unwrap();
     let store = open_test_store(tmp.path());
@@ -139,6 +169,7 @@ async fn lens_recalls_matching_continuation_before_raw_event_fallback() {
     let input = ContinuationInput {
         title: "项目状态机不是目标".to_string(),
         summary: "summary also participates in continuation recall".to_string(),
+        continuation_type: ContinuationType::Narrative,
         status: ContinuationStatus::Active,
         parent_id: None,
         raw_event_id: None,

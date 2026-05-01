@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::bail;
 use clap::{Parser, Subcommand};
 use tfk_protocol::{
-    ContinuationInput, ContinuationStatus, EventSource, LensRequest, RawEventInput,
+    ContinuationInput, ContinuationStatus, ContinuationType, EventSource, LensRequest,
+    RawEventInput,
 };
 
 #[derive(Debug, Parser)]
@@ -47,6 +48,12 @@ enum ContinuationCommand {
         parent_id: Option<String>,
         #[arg(long)]
         raw_event_id: Option<String>,
+        #[arg(
+            long = "kind",
+            alias = "continuation-type",
+            default_value = "narrative"
+        )]
+        continuation_type: ContinuationType,
         title: String,
     },
     /// List stored continuations.
@@ -92,10 +99,12 @@ async fn main() -> anyhow::Result<()> {
                 summary,
                 parent_id,
                 raw_event_id,
+                continuation_type,
             } => {
                 let input = ContinuationInput {
                     title,
                     summary,
+                    continuation_type,
                     status: ContinuationStatus::Active,
                     parent_id,
                     raw_event_id,
@@ -176,12 +185,14 @@ mod tests {
                         summary,
                         parent_id,
                         raw_event_id,
+                        continuation_type,
                     },
             } => {
                 assert_eq!(title, "项目状态机不是目标");
                 assert_eq!(summary, "继续跟踪");
                 assert_eq!(parent_id.as_deref(), Some("cont_parent"));
                 assert_eq!(raw_event_id.as_deref(), Some("evt_source"));
+                assert_eq!(continuation_type, ContinuationType::Narrative);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -197,6 +208,71 @@ mod tests {
                 command: ContinuationCommand::List
             }
         ));
+    }
+
+    #[test]
+    fn parses_continuation_create_kind() {
+        let cli = Cli::parse_from([
+            "tfk",
+            "continuation",
+            "create",
+            "--summary",
+            "继续跟踪",
+            "--kind",
+            "obligation",
+            "项目状态机不是目标",
+        ]);
+
+        match cli.command {
+            Command::Continuation {
+                command:
+                    ContinuationCommand::Create {
+                        continuation_type, ..
+                    },
+            } => assert_eq!(continuation_type, ContinuationType::Obligation),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_continuation_create_continuation_type_alias() {
+        let cli = Cli::parse_from([
+            "tfk",
+            "continuation",
+            "create",
+            "--summary",
+            "继续跟踪",
+            "--continuation-type",
+            "risk",
+            "项目状态机不是目标",
+        ]);
+
+        match cli.command {
+            Command::Continuation {
+                command:
+                    ContinuationCommand::Create {
+                        continuation_type, ..
+                    },
+            } => assert_eq!(continuation_type, ContinuationType::Risk),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_continuation_create_kind() {
+        let error = Cli::try_parse_from([
+            "tfk",
+            "continuation",
+            "create",
+            "--summary",
+            "继续跟踪",
+            "--kind",
+            "memory",
+            "项目状态机不是目标",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

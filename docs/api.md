@@ -51,6 +51,7 @@ Returns `ApiEnvelope<StoredRawEvent>`.
 ### POST /v1/continuations
 
 Accepts `ContinuationInput` and records a minimal continuation graph node in SQLite.
+When omitted, `continuation_type` defaults to `narrative` for backward compatibility.
 
 Minimal body:
 
@@ -58,6 +59,7 @@ Minimal body:
 {
   "title": "项目状态机不是目标",
   "summary": "继续跟踪这个判断",
+  "continuation_type": "narrative",
   "status": "active",
   "parent_id": null,
   "raw_event_id": null

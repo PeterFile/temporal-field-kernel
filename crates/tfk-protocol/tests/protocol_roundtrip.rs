@@ -1,7 +1,7 @@
 use schemars::schema_for;
 use tfk_protocol::{
-    ApiEnvelope, ContinuationInput, ContinuationStatus, EventModality, EventSource, EvidenceStatus,
-    RawEventInput, StoredContinuation,
+    ApiEnvelope, ContinuationInput, ContinuationStatus, ContinuationType, EventModality,
+    EventSource, EvidenceStatus, RawEventInput, StoredContinuation,
 };
 
 #[test]
@@ -38,6 +38,7 @@ fn continuation_wire_types_are_stable_json_and_schema_compatible() {
     let input = ContinuationInput {
         title: "项目状态机不是目标".to_string(),
         summary: "保留成可恢复的后续工作，而不是一次性 raw event".to_string(),
+        continuation_type: ContinuationType::Obligation,
         status: ContinuationStatus::Active,
         parent_id: Some("cont_parent".to_string()),
         raw_event_id: Some("evt_source".to_string()),
@@ -46,6 +47,7 @@ fn continuation_wire_types_are_stable_json_and_schema_compatible() {
     let json = serde_json::to_value(&input).unwrap();
 
     assert_eq!(json["status"], "active");
+    assert_eq!(json["continuation_type"], "obligation");
     assert_eq!(json["parent_id"], "cont_parent");
     assert_eq!(json["raw_event_id"], "evt_source");
 
@@ -53,6 +55,7 @@ fn continuation_wire_types_are_stable_json_and_schema_compatible() {
         id: "cont_1".to_string(),
         title: input.title,
         summary: input.summary,
+        continuation_type: input.continuation_type,
         status: input.status,
         parent_id: input.parent_id,
         raw_event_id: input.raw_event_id,
@@ -63,6 +66,21 @@ fn continuation_wire_types_are_stable_json_and_schema_compatible() {
 
     assert_eq!(stored_json["id"], "cont_1");
     assert_eq!(stored_json["status"], "active");
+    assert_eq!(stored_json["continuation_type"], "obligation");
     let _input_schema = schema_for!(ContinuationInput);
     let _stored_schema = schema_for!(StoredContinuation);
+}
+
+#[test]
+fn continuation_input_defaults_legacy_missing_type_to_narrative() {
+    let input: ContinuationInput = serde_json::from_value(serde_json::json!({
+        "title": "项目状态机不是目标",
+        "summary": "继续跟踪这个判断",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+    }))
+    .unwrap();
+
+    assert_eq!(input.continuation_type, ContinuationType::Narrative);
 }

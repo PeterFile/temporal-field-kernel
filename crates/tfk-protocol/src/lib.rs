@@ -1,5 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -91,16 +92,26 @@ impl<T> ApiEnvelope<T> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ContinuationType {
     Obligation,
     Epistemic,
     Relational,
+    #[default]
     Narrative,
     Risk,
     Opportunity,
     Rhythm,
+}
+
+impl FromStr for ContinuationType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        serde_json::from_value(serde_json::Value::String(value.to_string()))
+            .map_err(|_| format!("invalid continuation type: {value}"))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -117,6 +128,8 @@ pub enum ContinuationStatus {
 pub struct ContinuationInput {
     pub title: String,
     pub summary: String,
+    #[serde(default)]
+    pub continuation_type: ContinuationType,
     pub status: ContinuationStatus,
     pub parent_id: Option<String>,
     pub raw_event_id: Option<String>,
@@ -127,6 +140,7 @@ pub struct StoredContinuation {
     pub id: String,
     pub title: String,
     pub summary: String,
+    pub continuation_type: ContinuationType,
     pub status: ContinuationStatus,
     pub parent_id: Option<String>,
     pub raw_event_id: Option<String>,

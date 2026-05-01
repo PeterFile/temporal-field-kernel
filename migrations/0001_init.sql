@@ -19,17 +19,12 @@ CREATE TABLE IF NOT EXISTS raw_events (
 
 CREATE TABLE IF NOT EXISTS continuations (
   id TEXT PRIMARY KEY,
-  type TEXT NOT NULL,
-  origin_event_id TEXT NOT NULL REFERENCES raw_events(id),
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  continuation_type TEXT NOT NULL DEFAULT 'narrative',
   status TEXT NOT NULL,
-  tension TEXT NOT NULL,
-  scope TEXT NOT NULL,
-  path_predicate TEXT NOT NULL,
-  pressure_curve TEXT NOT NULL,
-  violation_cost TEXT NOT NULL,
-  closure_condition TEXT,
-  repair_policy TEXT,
-  confidence REAL NOT NULL,
+  parent_id TEXT,
+  raw_event_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

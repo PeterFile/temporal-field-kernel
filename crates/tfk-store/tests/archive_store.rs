@@ -2,7 +2,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 
 use tempfile::tempdir;
-use tfk_protocol::{ContinuationInput, ContinuationStatus, EventSource, RawEventInput};
+use tfk_protocol::{
+    ContinuationInput, ContinuationStatus, ContinuationType, EventSource, RawEventInput,
+};
 use tfk_store::Store;
 
 #[test]
@@ -141,6 +143,7 @@ fn continuation_create_list_get_persists_in_sqlite() {
             .create_continuation(&ContinuationInput {
                 title: "项目状态机不是目标".to_string(),
                 summary: "继续跟踪这个判断".to_string(),
+                continuation_type: ContinuationType::Obligation,
                 status: ContinuationStatus::Active,
                 parent_id: Some("cont_parent".to_string()),
                 raw_event_id: Some("evt_source".to_string()),
@@ -150,6 +153,7 @@ fn continuation_create_list_get_persists_in_sqlite() {
         assert!(created.id.starts_with("cont_"));
         assert_eq!(created.title, "项目状态机不是目标");
         assert_eq!(created.summary, "继续跟踪这个判断");
+        assert_eq!(created.continuation_type, ContinuationType::Obligation);
         assert_eq!(created.status, ContinuationStatus::Active);
         assert_eq!(created.parent_id.as_deref(), Some("cont_parent"));
         assert_eq!(created.raw_event_id.as_deref(), Some("evt_source"));
@@ -173,6 +177,7 @@ fn continuation_search_matches_title_and_summary_as_literal_text() {
         .create_continuation(&ContinuationInput {
             title: "状态机 100%_literal".to_string(),
             summary: "继续保存 continuation graph provenance".to_string(),
+            continuation_type: ContinuationType::Risk,
             status: ContinuationStatus::Active,
             parent_id: None,
             raw_event_id: None,
@@ -182,6 +187,7 @@ fn continuation_search_matches_title_and_summary_as_literal_text() {
         .create_continuation(&ContinuationInput {
             title: "状态机 100xxliteral".to_string(),
             summary: "unrelated".to_string(),
+            continuation_type: ContinuationType::Narrative,
             status: ContinuationStatus::Deferred,
             parent_id: None,
             raw_event_id: None,
@@ -194,6 +200,45 @@ fn continuation_search_matches_title_and_summary_as_literal_text() {
     let summary_hits = store.search_continuations("continuation graph").unwrap();
     assert_eq!(summary_hits, vec![target.id]);
     assert!(!summary_hits.contains(&other.id));
+}
+
+#[test]
+fn opening_legacy_continuation_table_adds_narrative_default() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let db_path = data_dir.join("tfk.db");
+    let archive_dir = data_dir.join("archive");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE continuations (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              status TEXT NOT NULL,
+              parent_id TEXT,
+              raw_event_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            INSERT INTO continuations (
+              id, title, summary, status, parent_id, raw_event_id, created_at, updated_at
+            ) VALUES (
+              'cont_legacy', 'legacy', 'old row', 'active', NULL, NULL,
+              '2026-05-02T00:00:00Z', '2026-05-02T00:00:00Z'
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&db_path, &archive_dir).unwrap();
+    let loaded = store.get_continuation("cont_legacy").unwrap().unwrap();
+
+    assert_eq!(loaded.continuation_type, ContinuationType::Narrative);
 }
 
 fn open_test_store(root: &std::path::Path) -> Store {
