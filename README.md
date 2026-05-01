@@ -1,8 +1,8 @@
 # Temporal Field Kernel
 
-Local-first temporal sidecar for popular agents.
+External Agent time-field kernel that turns history into influence on futures, tasks into continuations, actions into path choices, and context into temporal lenses.
 
-Current scope: no UI. The MVP is a Rust kernel daemon, Rust CLI, SQLite WAL projection store, append-only JSONL raw event archive, Datalog-like rules, optional Python prediction sidecar, local UDS/HTTP API, and MCP thin wrapper.
+Current scope: no UI in core. The MVP is a Rust kernel daemon, Rust CLI, SQLite WAL projection store, append-only JSONL raw event archive, Datalog-like rules, optional Python prediction sidecar, local UDS/HTTP API, and MCP thin wrapper.
 
 ## Workspace
 
@@ -10,7 +10,7 @@ Current scope: no UI. The MVP is a Rust kernel daemon, Rust CLI, SQLite WAL proj
 crates/
   tfk-protocol      shared wire types
   tfk-core          continuation/preflight/lens logic
-  tfk-store         SQLite + JSONL storage
+  tfk-store         SQLite + JSONL temporal projection/archive
   tfk-rules         embedded Datalog-like rule engine
   tfk-api           local API router
   tfk-daemon        tfkd binary
@@ -31,7 +31,7 @@ cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock continuation get cont_...
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock lens "项目状态机"
 ```
 
-The daemon stores raw events in:
+The daemon keeps the raw event archive and rebuildable projection in:
 
 ```text
 <data-dir>/tfk.db

@@ -4,19 +4,19 @@
 
 - Rust workspace
 - tfkd / tfk binaries
-- SQLite WAL store
+- SQLite WAL temporal projection
 - append-only JSONL archive
 - raw event index
 - FTS5 search
 - preflight scoring
-- store-backed `/v1/observe`, `/v1/preflight`, and minimal `/v1/lens`
+- projection-backed `/v1/observe`, `/v1/preflight`, and minimal `/v1/lens`
 - `tfk observe` and `tfk lens` UDS calls into `tfkd`
 - lens/preflight protocol types
 
 ## v0.2
 
-- minimal continuation graph protocol/store/API/CLI
-- continuation-aware `/v1/lens` recall with raw event fallback
+- minimal continuation graph protocol/projection/API/CLI
+- continuation-aware temporal lens output with raw event fallback
 - MCP thin wrapper
 - CLI wrapper session capture
 - embedded Datalog-like fixed-point rules
@@ -26,4 +26,4 @@
 
 - sqlite-vec adapter
 - optional Python sidecar with river
-- model prediction table
+- advisory forming-future prediction table

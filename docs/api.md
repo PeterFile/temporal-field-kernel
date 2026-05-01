@@ -29,7 +29,7 @@ Returns an `ApiEnvelope` with `{ "status": "ok" }`.
 
 ### POST /v1/observe
 
-Accepts `RawEventInput` and appends it to the JSONL archive plus SQLite/FTS projection.
+Accepts `RawEventInput` and appends it to the JSONL archive plus SQLite/FTS projection for historical influence.
 
 Minimal body:
 
@@ -50,7 +50,7 @@ Returns `ApiEnvelope<StoredRawEvent>`.
 
 ### POST /v1/continuations
 
-Accepts `ContinuationInput` and stores a minimal continuation graph node in SQLite.
+Accepts `ContinuationInput` and records a minimal continuation graph node in SQLite.
 
 Minimal body:
 
@@ -105,4 +105,4 @@ Accepts `LensRequest`:
 }
 ```
 
-Current behavior is intentionally minimal: search continuation title/summary first and return a `LensCard` grounded by matching `continuation` provenance. If no continuation matches, it falls back to raw event recall with `raw_event` provenance.
+Current behavior is intentionally minimal: search continuation title/summary first and return a temporal `LensCard` grounded by matching `continuation` provenance. If no continuation matches, it falls back to raw events with `raw_event` provenance. This is a lens over living pasts, not a generic memory recall API.
