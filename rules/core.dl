@@ -4,3 +4,8 @@
 active(C) :- continuation(C), continuation_status(C, "active").
 needs_review(C) :- active(C), risk_level(C, "high").
 risk_marker(C, "review") :- needs_review(C).
+living_past(C) :- active(C).
+commitment(C) :- active(C), continuation_type(C, "obligation").
+forming_future(C) :- active(C), continuation_type(C, "opportunity").
+timing_attention(C) :- active(C), time_horizon(C, "near").
+path_choice(C, "review_now") :- needs_review(C), timing_attention(C).

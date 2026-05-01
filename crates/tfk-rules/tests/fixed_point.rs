@@ -1,4 +1,4 @@
-use tfk_protocol::ContinuationStatus;
+use tfk_protocol::{ContinuationStatus, ContinuationType};
 use tfk_rules::{Atom, Rule, RuleEngine, RuleFact, Term};
 
 fn fact(predicate: &str, args: &[&str]) -> RuleFact {
@@ -7,6 +7,14 @@ fn fact(predicate: &str, args: &[&str]) -> RuleFact {
 
 fn args(facts: Vec<&RuleFact>) -> Vec<Vec<String>> {
     facts.into_iter().map(|fact| fact.args.clone()).collect()
+}
+
+fn serde_value<T: serde::Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 #[test]
@@ -88,11 +96,7 @@ fn joins_body_atoms_by_shared_variable_names() {
 #[test]
 fn core_rules_derive_active_review_and_marker_facts() {
     let mut engine = RuleEngine::with_core_rules();
-    let active_status = serde_json::to_value(ContinuationStatus::Active)
-        .unwrap()
-        .as_str()
-        .unwrap()
-        .to_string();
+    let active_status = serde_value(ContinuationStatus::Active);
 
     assert_eq!(active_status, "active");
 
@@ -103,9 +107,13 @@ fn core_rules_derive_active_review_and_marker_facts() {
     engine.assert_fact(fact("risk_level", &["cont-1", "high"]));
     engine.assert_fact(fact("risk_level", &["cont-2", "high"]));
 
-    assert_eq!(engine.evaluate(), 3);
+    assert_eq!(engine.evaluate(), 4);
     assert_eq!(
         args(engine.query("active")),
+        vec![vec!["cont-1".to_string()]]
+    );
+    assert_eq!(
+        args(engine.query("living_past")),
         vec![vec!["cont-1".to_string()]]
     );
     assert_eq!(
@@ -115,5 +123,110 @@ fn core_rules_derive_active_review_and_marker_facts() {
     assert_eq!(
         args(engine.query("risk_marker")),
         vec![vec!["cont-1".to_string(), "review".to_string()]]
+    );
+}
+
+#[test]
+fn core_rules_derive_time_field_facts_only_for_matching_inputs() {
+    let mut engine = RuleEngine::with_core_rules();
+    let active_status = serde_value(ContinuationStatus::Active);
+    let obligation_type = serde_value(ContinuationType::Obligation);
+    let opportunity_type = serde_value(ContinuationType::Opportunity);
+
+    assert_eq!(obligation_type, "obligation");
+    assert_eq!(opportunity_type, "opportunity");
+
+    for continuation in [
+        "obligation-near",
+        "opportunity-near",
+        "inactive-obligation",
+        "active-epistemic",
+        "active-far",
+    ] {
+        engine.assert_fact(fact("continuation", &[continuation]));
+    }
+
+    engine.assert_fact(fact(
+        "continuation_status",
+        &["obligation-near", &active_status],
+    ));
+    engine.assert_fact(fact(
+        "continuation_status",
+        &["opportunity-near", &active_status],
+    ));
+    engine.assert_fact(fact(
+        "continuation_status",
+        &["inactive-obligation", "deferred"],
+    ));
+    engine.assert_fact(fact(
+        "continuation_status",
+        &["active-epistemic", &active_status],
+    ));
+    engine.assert_fact(fact("continuation_status", &["active-far", &active_status]));
+
+    engine.assert_fact(fact(
+        "continuation_type",
+        &["obligation-near", &obligation_type],
+    ));
+    engine.assert_fact(fact(
+        "continuation_type",
+        &["opportunity-near", &opportunity_type],
+    ));
+    engine.assert_fact(fact(
+        "continuation_type",
+        &["inactive-obligation", &obligation_type],
+    ));
+    engine.assert_fact(fact(
+        "continuation_type",
+        &["active-epistemic", "epistemic"],
+    ));
+    engine.assert_fact(fact(
+        "continuation_type",
+        &["active-far", &opportunity_type],
+    ));
+
+    engine.assert_fact(fact("time_horizon", &["obligation-near", "near"]));
+    engine.assert_fact(fact("time_horizon", &["opportunity-near", "near"]));
+    engine.assert_fact(fact("time_horizon", &["inactive-obligation", "near"]));
+    engine.assert_fact(fact("time_horizon", &["active-far", "far"]));
+
+    engine.assert_fact(fact("risk_level", &["obligation-near", "high"]));
+    engine.assert_fact(fact("risk_level", &["opportunity-near", "low"]));
+
+    engine.evaluate();
+
+    assert_eq!(
+        args(engine.query("living_past")),
+        vec![
+            vec!["active-epistemic".to_string()],
+            vec!["active-far".to_string()],
+            vec!["obligation-near".to_string()],
+            vec!["opportunity-near".to_string()],
+        ]
+    );
+    assert_eq!(
+        args(engine.query("commitment")),
+        vec![vec!["obligation-near".to_string()]]
+    );
+    assert_eq!(
+        args(engine.query("forming_future")),
+        vec![
+            vec!["active-far".to_string()],
+            vec!["opportunity-near".to_string()],
+        ]
+    );
+    assert_eq!(
+        args(engine.query("timing_attention")),
+        vec![
+            vec!["obligation-near".to_string()],
+            vec!["opportunity-near".to_string()],
+        ]
+    );
+    assert_eq!(
+        args(engine.query("path_choice")),
+        vec![vec![
+            "obligation-near".to_string(),
+            "review_now".to_string()
+        ]]
     );
 }

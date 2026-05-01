@@ -195,6 +195,50 @@ pub fn core_rules() -> Vec<Rule> {
             ),
             vec![Atom::new("needs_review", [Term::var("continuation")])],
         ),
+        Rule::new(
+            Atom::new("living_past", [Term::var("continuation")]),
+            vec![Atom::new("active", [Term::var("continuation")])],
+        ),
+        Rule::new(
+            Atom::new("commitment", [Term::var("continuation")]),
+            vec![
+                Atom::new("active", [Term::var("continuation")]),
+                Atom::new(
+                    "continuation_type",
+                    [Term::var("continuation"), Term::lit("obligation")],
+                ),
+            ],
+        ),
+        Rule::new(
+            Atom::new("forming_future", [Term::var("continuation")]),
+            vec![
+                Atom::new("active", [Term::var("continuation")]),
+                Atom::new(
+                    "continuation_type",
+                    [Term::var("continuation"), Term::lit("opportunity")],
+                ),
+            ],
+        ),
+        Rule::new(
+            Atom::new("timing_attention", [Term::var("continuation")]),
+            vec![
+                Atom::new("active", [Term::var("continuation")]),
+                Atom::new(
+                    "time_horizon",
+                    [Term::var("continuation"), Term::lit("near")],
+                ),
+            ],
+        ),
+        Rule::new(
+            Atom::new(
+                "path_choice",
+                [Term::var("continuation"), Term::lit("review_now")],
+            ),
+            vec![
+                Atom::new("needs_review", [Term::var("continuation")]),
+                Atom::new("timing_attention", [Term::var("continuation")]),
+            ],
+        ),
     ]
 }
 
