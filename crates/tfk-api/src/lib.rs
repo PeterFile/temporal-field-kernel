@@ -1,0 +1,166 @@
+use std::sync::{Arc, Mutex};
+
+use axum::{
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+    Json, Router,
+};
+use serde_json::{json, Value};
+use tfk_core::{PreflightScorer, PreflightSignals};
+use tfk_protocol::{ApiEnvelope, LensCard, LensRequest, ProvenanceRef, RawEventInput};
+use tfk_store::{Store, StoredRawEvent};
+
+#[derive(Clone)]
+pub struct ApiState {
+    store: Arc<Mutex<Store>>,
+    preflight_scorer: PreflightScorer,
+}
+
+impl ApiState {
+    pub fn new(store: Store) -> Self {
+        Self {
+            store: Arc::new(Mutex::new(store)),
+            preflight_scorer: PreflightScorer::with_threshold(0.5),
+        }
+    }
+}
+
+pub fn router() -> Router {
+    Router::new().route("/healthz", get(health_handler))
+}
+
+pub fn router_with_store(store: Store) -> Router {
+    router_with_state(ApiState::new(store))
+}
+
+pub fn router_with_state(state: ApiState) -> Router {
+    Router::new()
+        .route("/healthz", get(health_handler))
+        .route("/v1/observe", post(observe_handler))
+        .route("/v1/preflight", post(preflight_handler))
+        .route("/v1/lens", post(lens_handler))
+        .with_state(state)
+}
+
+pub fn health_envelope(
+    request_id: impl Into<String>,
+    trace_id: impl Into<String>,
+) -> ApiEnvelope<Value> {
+    ApiEnvelope::ok(request_id, trace_id, json!({ "status": "ok" }))
+}
+
+async fn health_handler() -> Json<ApiEnvelope<Value>> {
+    Json(health_envelope("local-health", "local-health"))
+}
+
+async fn observe_handler(
+    State(state): State<ApiState>,
+    Json(input): Json<RawEventInput>,
+) -> Result<Json<ApiEnvelope<StoredRawEvent>>, ApiError> {
+    let stored = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .append_raw_event(&input)
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-observe",
+        "local-observe",
+        stored,
+    )))
+}
+
+async fn preflight_handler(
+    State(state): State<ApiState>,
+    Json(signals): Json<PreflightSignals>,
+) -> Json<ApiEnvelope<tfk_core::PreflightResult>> {
+    Json(ApiEnvelope::ok(
+        "local-preflight",
+        "local-preflight",
+        state.preflight_scorer.score(signals),
+    ))
+}
+
+async fn lens_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<LensRequest>,
+) -> Result<Json<ApiEnvelope<LensCard>>, ApiError> {
+    let events = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|_| internal_error("store lock poisoned"))?;
+        let hits = store
+            .search_raw_events(&request.query)
+            .map_err(|error| internal_error(error.to_string()))?;
+        let mut events = Vec::new();
+        for id in hits {
+            if let Some(event) = store
+                .get_raw_event(&id)
+                .map_err(|error| internal_error(error.to_string()))?
+            {
+                events.push(event);
+            }
+        }
+        events
+    };
+
+    let card = lens_card(&request, events.len());
+    let mut envelope = ApiEnvelope::ok("local-lens", "local-lens", card);
+    envelope.provenance = events
+        .into_iter()
+        .map(|event| ProvenanceRef {
+            kind: "raw_event".to_string(),
+            id: event.id,
+        })
+        .collect();
+
+    Ok(Json(envelope))
+}
+
+fn lens_card(request: &LensRequest, hit_count: usize) -> LensCard {
+    if hit_count == 0 {
+        return LensCard {
+            stance: "scaffold".to_string(),
+            why_now: format!("no matching raw events found for query: {}", request.query),
+            avoid: vec![
+                "do not invent continuity without stored evidence".to_string(),
+                "do not treat this scaffold as a full continuation graph".to_string(),
+            ],
+            open_questions: vec!["what evidence should be observed next?".to_string()],
+        };
+    }
+
+    LensCard {
+        stance: "grounded_recall".to_string(),
+        why_now: format!(
+            "{hit_count} matching raw event(s) found for query: {}",
+            request.query
+        ),
+        avoid: vec![
+            "do not infer closure from raw recall alone".to_string(),
+            "do not treat this as a full continuation graph yet".to_string(),
+        ],
+        open_questions: vec![
+            "which recalled event should become an active continuation?".to_string()
+        ],
+    }
+}
+
+type ApiError = (StatusCode, Json<ApiEnvelope<Value>>);
+
+fn internal_error(message: impl Into<String>) -> ApiError {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiEnvelope {
+            request_id: "local-error".to_string(),
+            trace_id: "local-error".to_string(),
+            ok: false,
+            data: None,
+            warnings: vec![message.into()],
+            provenance: Vec::new(),
+        }),
+    )
+}

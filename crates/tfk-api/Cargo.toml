@@ -1,0 +1,19 @@
+[package]
+name = "tfk-api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tfk-core = { path = "../tfk-core" }
+tfk-protocol = { path = "../tfk-protocol" }
+tfk-store = { path = "../tfk-store" }
+tower.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

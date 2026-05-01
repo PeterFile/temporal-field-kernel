@@ -1,0 +1,41 @@
+[workspace]
+members = [
+  "crates/tfk-protocol",
+  "crates/tfk-core",
+  "crates/tfk-store",
+  "crates/tfk-rules",
+  "crates/tfk-api",
+  "crates/tfk-model-client",
+  "crates/tfk-daemon",
+  "crates/tfk-cli",
+  "crates/tfk-mcp",
+  "crates/tfk-eval",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+repository = "https://github.com/temporal-field-kernel/temporal-field-kernel"
+
+[workspace.dependencies]
+anyhow = "1"
+axum = "0.7"
+clap = { version = "4", features = ["derive", "env"] }
+hex = "0.4"
+hyper = { version = "1", features = ["server"] }
+hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+schemars = { version = "0.8", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "1"
+time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "io-util", "time"] }
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["serde", "v4"] }

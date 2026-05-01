@@ -1,0 +1,26 @@
+[daemon]
+socket_path = "auto"
+http_enabled = false
+http_bind = "127.0.0.1:7331"
+
+[storage]
+data_dir = "auto"
+archive_rotation = "daily"
+sqlite_wal = true
+encryption = "os" # os | sqlcipher | none
+
+[vector]
+backend = "sqlite-vec" # sqlite-vec | sqlite-vss | none
+
+[rules]
+engine = "embedded-datalog"
+rules_dir = "rules"
+
+[predictor]
+enabled = false
+mode = "stdio"
+command = "uv run python -m tfk_predictor.server"
+
+[privacy]
+retention_days = 365
+allow_cloud_models = false

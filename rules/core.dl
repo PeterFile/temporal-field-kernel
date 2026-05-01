@@ -1,0 +1,2 @@
+# Embedded Datalog-like MVP rules. Syntax is provisional.
+# requires_confirmation(A) :- action(A), high_irreversibility(A), high_externality(A), uncertain(A).

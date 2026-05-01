@@ -1,0 +1,2 @@
+-- Placeholder for sqlite-vec/sqlite-vss virtual tables.
+-- Vector search must stay optional; NoopVectorIndex remains the fallback.
