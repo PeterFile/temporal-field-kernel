@@ -1076,7 +1076,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde",
  "serde_json",
+ "tempfile",
+ "tfk-protocol",
+ "tfk-store",
 ]
 
 [[package]]
@@ -1085,7 +1089,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde",
  "serde_json",
+ "tfk-protocol",
+ "tokio",
 ]
 
 [[package]]

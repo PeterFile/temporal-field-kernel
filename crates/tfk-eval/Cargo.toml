@@ -12,4 +12,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
+tfk-protocol = { path = "../tfk-protocol" }
+tfk-store = { path = "../tfk-store" }
