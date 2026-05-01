@@ -1,3 +1,4 @@
+use tfk_protocol::ContinuationStatus;
 use tfk_rules::{Atom, Rule, RuleEngine, RuleFact, Term};
 
 fn fact(predicate: &str, args: &[&str]) -> RuleFact {
@@ -87,9 +88,17 @@ fn joins_body_atoms_by_shared_variable_names() {
 #[test]
 fn core_rules_derive_active_review_and_marker_facts() {
     let mut engine = RuleEngine::with_core_rules();
+    let active_status = serde_json::to_value(ContinuationStatus::Active)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert_eq!(active_status, "active");
+
     engine.assert_fact(fact("continuation", &["cont-1"]));
     engine.assert_fact(fact("continuation", &["cont-2"]));
-    engine.assert_fact(fact("continuation_status", &["cont-1", "open"]));
+    engine.assert_fact(fact("continuation_status", &["cont-1", &active_status]));
     engine.assert_fact(fact("continuation_status", &["cont-2", "closed"]));
     engine.assert_fact(fact("risk_level", &["cont-1", "high"]));
     engine.assert_fact(fact("risk_level", &["cont-2", "high"]));
