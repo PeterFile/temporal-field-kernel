@@ -7,7 +7,8 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tfk_protocol::{
-    ContinuationInput, ContinuationStatus, ContinuationType, RawEventInput, StoredContinuation,
+    ContinuationDelta, ContinuationInput, ContinuationStatus, ContinuationType, RawEventInput,
+    StoredContinuation, TemporalDeltaInput,
 };
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -23,6 +24,8 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("time format error: {0}")]
     TimeFormat(#[from] time::error::Format),
+    #[error("invalid temporal delta: {0}")]
+    InvalidTemporalDelta(String),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -48,6 +51,16 @@ pub struct StoredRawEvent {
     pub archive_len: i64,
     pub content_hash: String,
     pub evidence_status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredTemporalDelta {
+    pub id: String,
+    pub action_id: String,
+    pub changes_json: String,
+    pub claims_json: String,
+    pub evidence_json: String,
     pub created_at: String,
 }
 
@@ -272,6 +285,78 @@ impl Store {
         Ok(hits)
     }
 
+    pub fn assimilate_delta(&mut self, input: &TemporalDeltaInput) -> Result<StoredTemporalDelta> {
+        let id = format!("delta_{}", Uuid::new_v4().simple());
+        let now = now_rfc3339()?;
+        let changes_json = serde_json::to_string(&input.changes)?;
+        let claims_json = serde_json::to_string(&input.claims_made)?;
+        let evidence_json = serde_json::to_string(&input.evidence)?;
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO temporal_deltas (
+                id, action_id, changes_json, claims_json, evidence_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                &id,
+                &input.action_id,
+                &changes_json,
+                &claims_json,
+                &evidence_json,
+                &now,
+            ],
+        )?;
+        for change in &input.changes {
+            let Some(status) = status_for_delta(change.delta) else {
+                continue;
+            };
+            let status = continuation_status_to_string(status)?;
+            let updated = tx.execute(
+                "UPDATE continuations
+                 SET status = ?1, updated_at = ?2
+                 WHERE id = ?3",
+                params![status, &now, &change.continuation_id],
+            )?;
+            if updated != 1 {
+                return Err(StoreError::InvalidTemporalDelta(format!(
+                    "status delta {:?} references unknown continuation {}",
+                    change.delta, change.continuation_id
+                )));
+            }
+        }
+        tx.commit()?;
+
+        Ok(self
+            .get_temporal_delta(&id)?
+            .expect("inserted temporal delta must be readable"))
+    }
+
+    pub fn list_temporal_deltas(&self) -> Result<Vec<StoredTemporalDelta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, action_id, changes_json, claims_json, evidence_json, created_at
+             FROM temporal_deltas
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([], row_to_temporal_delta)?;
+        let mut deltas = Vec::new();
+        for row in rows {
+            deltas.push(row?);
+        }
+        Ok(deltas)
+    }
+
+    pub fn get_temporal_delta(&self, id: &str) -> Result<Option<StoredTemporalDelta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, action_id, changes_json, claims_json, evidence_json, created_at
+             FROM temporal_deltas WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(row_to_temporal_delta(row)?))
+    }
+
     fn search_raw_events_fts(&self, query: &str) -> Result<Vec<String>> {
         let fts_query = fts_literal_query(query);
         let pattern = like_literal_pattern(query);
@@ -304,6 +389,32 @@ impl Store {
             hits.push(row?);
         }
         Ok(hits)
+    }
+}
+
+fn row_to_temporal_delta(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredTemporalDelta> {
+    Ok(StoredTemporalDelta {
+        id: row.get(0)?,
+        action_id: row.get(1)?,
+        changes_json: row.get(2)?,
+        claims_json: row.get(3)?,
+        evidence_json: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+fn status_for_delta(delta: ContinuationDelta) -> Option<ContinuationStatus> {
+    match delta {
+        ContinuationDelta::Activate
+        | ContinuationDelta::Advance
+        | ContinuationDelta::Repair
+        | ContinuationDelta::Verify
+        | ContinuationDelta::Renegotiate => Some(ContinuationStatus::Active),
+        ContinuationDelta::Create | ContinuationDelta::Split => None,
+        ContinuationDelta::Stabilize => Some(ContinuationStatus::Stabilized),
+        ContinuationDelta::Defer => Some(ContinuationStatus::Deferred),
+        ContinuationDelta::Close => Some(ContinuationStatus::Closed),
+        ContinuationDelta::Retire => Some(ContinuationStatus::Retired),
     }
 }
 
@@ -510,6 +621,14 @@ fn run_migrations(conn: &Connection) -> Result<()> {
           raw_event_id TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS temporal_deltas (
+          id TEXT PRIMARY KEY,
+          action_id TEXT NOT NULL,
+          changes_json TEXT NOT NULL,
+          claims_json TEXT NOT NULL,
+          evidence_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
         );
         "#,
     )?;

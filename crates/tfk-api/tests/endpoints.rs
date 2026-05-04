@@ -5,8 +5,9 @@ use axum::{
 use tempfile::tempdir;
 use tfk_core::{PreflightResult, PreflightSignals};
 use tfk_protocol::{
-    ApiEnvelope, ContinuationInput, ContinuationStatus, ContinuationType, EventSource, LensCard,
-    LensRequest, RawEventInput, StoredContinuation,
+    ApiEnvelope, CandidateAction, CommitRequest, ContinuationDelta, ContinuationInput,
+    ContinuationStatus, ContinuationStatusDelta, ContinuationType, EventSource, ForecastRequest,
+    ForecastResult, LensCard, LensRequest, RawEventInput, StoredContinuation, TemporalDeltaInput,
 };
 use tfk_store::{Store, StoredRawEvent};
 use tower::ServiceExt;
@@ -77,6 +78,57 @@ async fn preflight_endpoint_returns_confirmation_decision() {
     assert!(result.requires_confirmation);
     assert_eq!(result.threshold, 0.5);
     assert!(result.risk_product > result.threshold);
+}
+
+#[tokio::test]
+async fn forecast_endpoint_returns_ranked_candidate_actions() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let forecast = ForecastRequest {
+        actions: vec![
+            CandidateAction {
+                name: "ship now".to_string(),
+                continuation_id: None,
+                progress: 0.9,
+                closure: 0.2,
+                option_value_preserved: 0.1,
+                risk: 0.8,
+                irreversibility: 0.8,
+                confusion: 0.4,
+                friction: 0.3,
+                temporal_debt_added: 0.6,
+                uncertainty: 0.8,
+                externality: 0.8,
+            },
+            CandidateAction {
+                name: "verify then ship".to_string(),
+                continuation_id: None,
+                progress: 0.7,
+                closure: 0.6,
+                option_value_preserved: 0.8,
+                risk: 0.1,
+                irreversibility: 0.1,
+                confusion: 0.1,
+                friction: 0.2,
+                temporal_debt_added: 0.0,
+                uncertainty: 0.2,
+                externality: 0.3,
+            },
+        ],
+        relations: Vec::new(),
+    };
+
+    let response = app
+        .oneshot(json_request("POST", "/v1/forecast", &forecast))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<ForecastResult> = read_json(response).await;
+    let result = envelope.data.unwrap();
+    assert_eq!(result.ranked_actions[0].name, "verify then ship");
+    assert!(result.ranked_actions[1].requires_confirmation);
 }
 
 #[tokio::test]
@@ -210,6 +262,161 @@ async fn lens_recalls_matching_continuation_before_raw_event_fallback() {
     let card = lens_envelope.data.unwrap();
     assert_eq!(card.stance, "continuation_recall");
     assert!(card.why_now.contains("1 matching continuation"));
+}
+
+#[tokio::test]
+async fn lens_projects_active_continuation_as_time_field_action_constraint() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let input = ContinuationInput {
+        title: "项目状态机不是目标".to_string(),
+        summary: "后续方案不能以 task state / project memory 为主轴".to_string(),
+        continuation_type: ContinuationType::Obligation,
+        status: ContinuationStatus::Active,
+        parent_id: None,
+        raw_event_id: None,
+    };
+    let create_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/continuations", &input))
+        .await
+        .unwrap();
+    let created: ApiEnvelope<StoredContinuation> = read_json(create_response).await;
+    let created = created.data.unwrap();
+
+    let lens = LensRequest {
+        query: "项目状态机".to_string(),
+        horizon: Vec::new(),
+        perspective: Vec::new(),
+    };
+    let lens_response = app
+        .oneshot(json_request("POST", "/v1/lens", &lens))
+        .await
+        .unwrap();
+
+    assert_eq!(lens_response.status(), StatusCode::OK);
+    let lens_envelope: ApiEnvelope<LensCard> = read_json(lens_response).await;
+    assert!(lens_envelope.ok);
+    assert_eq!(lens_envelope.provenance[0].kind, "continuation");
+    assert_eq!(lens_envelope.provenance[0].id, created.id);
+    let card = lens_envelope.data.unwrap();
+    assert_eq!(card.stance, "act");
+    assert_eq!(card.active_continuations.len(), 1);
+    assert_eq!(card.active_continuations[0].id, created.id);
+    assert!(card.active_continuations[0].pressure > 0.8);
+    assert!(card.preferred_action.is_some());
+}
+
+#[tokio::test]
+async fn commit_endpoint_creates_active_obligation_continuation() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let request = CommitRequest {
+        speaker: "agent".to_string(),
+        statement: "I will send the draft tomorrow".to_string(),
+        scope: Some("current_project".to_string()),
+        deadline: Some("2026-05-02".to_string()),
+        revocable: true,
+    };
+
+    let response = app
+        .oneshot(json_request("POST", "/v1/commit", &request))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<StoredContinuation> = read_json(response).await;
+    let continuation = envelope.data.unwrap();
+    assert_eq!(continuation.continuation_type, ContinuationType::Obligation);
+    assert_eq!(continuation.status, ContinuationStatus::Active);
+    assert!(continuation.summary.contains("scope=current_project"));
+    assert!(continuation.summary.contains("deadline=2026-05-02"));
+    assert!(continuation.summary.contains("revocable=true"));
+}
+
+#[tokio::test]
+async fn assimilate_endpoint_persists_delta_and_updates_continuation_status() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let input = ContinuationInput {
+        title: "verify release".to_string(),
+        summary: "risk must be checked".to_string(),
+        continuation_type: ContinuationType::Risk,
+        status: ContinuationStatus::Active,
+        parent_id: None,
+        raw_event_id: None,
+    };
+    let create_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/continuations", &input))
+        .await
+        .unwrap();
+    let created: ApiEnvelope<StoredContinuation> = read_json(create_response).await;
+    let created = created.data.unwrap();
+    let delta = TemporalDeltaInput {
+        action_id: "a42".to_string(),
+        changes: vec![ContinuationStatusDelta {
+            continuation_id: created.id.clone(),
+            delta: ContinuationDelta::Close,
+        }],
+        claims_made: Vec::new(),
+        evidence: Vec::new(),
+    };
+
+    let response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/assimilate", &delta))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<tfk_store::StoredTemporalDelta> = read_json(response).await;
+    assert_eq!(envelope.data.unwrap().action_id, "a42");
+
+    let get_response = app
+        .oneshot(empty_request(
+            "GET",
+            &format!("/v1/continuations/{}", created.id),
+        ))
+        .await
+        .unwrap();
+    let get_envelope: ApiEnvelope<StoredContinuation> = read_json(get_response).await;
+    assert_eq!(
+        get_envelope.data.unwrap().status,
+        ContinuationStatus::Closed
+    );
+}
+
+#[tokio::test]
+async fn assimilate_endpoint_rejects_missing_status_target() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let delta = TemporalDeltaInput {
+        action_id: "a-missing".to_string(),
+        changes: vec![ContinuationStatusDelta {
+            continuation_id: "missing-continuation".to_string(),
+            delta: ContinuationDelta::Advance,
+        }],
+        claims_made: Vec::new(),
+        evidence: Vec::new(),
+    };
+
+    let response = app
+        .oneshot(json_request("POST", "/v1/assimilate", &delta))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let envelope: ApiEnvelope<serde_json::Value> = read_json(response).await;
+    assert!(!envelope.ok);
+    assert!(envelope
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("missing-continuation")));
 }
 
 fn open_test_store(root: &std::path::Path) -> Store {

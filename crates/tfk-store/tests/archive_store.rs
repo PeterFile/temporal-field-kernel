@@ -3,7 +3,8 @@ use std::os::unix::fs::PermissionsExt as _;
 
 use tempfile::tempdir;
 use tfk_protocol::{
-    ContinuationInput, ContinuationStatus, ContinuationType, EventSource, RawEventInput,
+    ContinuationDelta, ContinuationInput, ContinuationStatus, ContinuationStatusDelta,
+    ContinuationType, EventSource, RawEventInput, TemporalDeltaInput,
 };
 use tfk_store::Store;
 
@@ -239,6 +240,165 @@ fn opening_legacy_continuation_table_adds_narrative_default() {
     let loaded = store.get_continuation("cont_legacy").unwrap().unwrap();
 
     assert_eq!(loaded.continuation_type, ContinuationType::Narrative);
+}
+
+#[test]
+fn temporal_delta_is_appended_and_assimilates_status_updates() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_test_store(tmp.path());
+    let created = store
+        .create_continuation(&ContinuationInput {
+            title: "verify release".to_string(),
+            summary: "risk must be checked".to_string(),
+            continuation_type: ContinuationType::Risk,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    let delta = TemporalDeltaInput {
+        action_id: "a42".to_string(),
+        changes: vec![ContinuationStatusDelta {
+            continuation_id: created.id.clone(),
+            delta: ContinuationDelta::Close,
+        }],
+        claims_made: Vec::new(),
+        evidence: Vec::new(),
+    };
+
+    let stored_delta = store.assimilate_delta(&delta).unwrap();
+
+    assert!(stored_delta.id.starts_with("delta_"));
+    assert_eq!(stored_delta.action_id, "a42");
+    let updated = store.get_continuation(&created.id).unwrap().unwrap();
+    assert_eq!(updated.status, ContinuationStatus::Closed);
+    assert_eq!(store.list_temporal_deltas().unwrap(), vec![stored_delta]);
+}
+
+#[test]
+fn temporal_delta_maps_supported_assimilation_deltas_to_statuses() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_test_store(tmp.path());
+    let cases = [
+        (ContinuationDelta::Activate, ContinuationStatus::Active),
+        (ContinuationDelta::Advance, ContinuationStatus::Active),
+        (ContinuationDelta::Repair, ContinuationStatus::Active),
+        (ContinuationDelta::Verify, ContinuationStatus::Active),
+        (ContinuationDelta::Renegotiate, ContinuationStatus::Active),
+        (ContinuationDelta::Stabilize, ContinuationStatus::Stabilized),
+        (ContinuationDelta::Defer, ContinuationStatus::Deferred),
+        (ContinuationDelta::Retire, ContinuationStatus::Retired),
+    ];
+    let changes: Vec<_> = cases
+        .iter()
+        .map(|(delta, _)| {
+            let continuation = store
+                .create_continuation(&ContinuationInput {
+                    title: format!("{delta:?} continuation"),
+                    summary: "assimilation mapping".to_string(),
+                    continuation_type: ContinuationType::Narrative,
+                    status: ContinuationStatus::Deferred,
+                    parent_id: None,
+                    raw_event_id: None,
+                })
+                .unwrap();
+            (continuation.id, *delta)
+        })
+        .collect();
+    let delta = TemporalDeltaInput {
+        action_id: "a43".to_string(),
+        changes: changes
+            .iter()
+            .map(|(continuation_id, delta)| ContinuationStatusDelta {
+                continuation_id: continuation_id.clone(),
+                delta: *delta,
+            })
+            .collect(),
+        claims_made: Vec::new(),
+        evidence: Vec::new(),
+    };
+
+    store.assimilate_delta(&delta).unwrap();
+
+    for ((continuation_id, _), (_, expected_status)) in changes.iter().zip(cases) {
+        let updated = store.get_continuation(continuation_id).unwrap().unwrap();
+        assert_eq!(updated.status, expected_status);
+    }
+}
+
+#[test]
+fn structural_create_and_split_deltas_are_append_only() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_test_store(tmp.path());
+    let continuation = store
+        .create_continuation(&ContinuationInput {
+            title: "existing continuation".to_string(),
+            summary: "structural deltas should not rewrite status".to_string(),
+            continuation_type: ContinuationType::Narrative,
+            status: ContinuationStatus::Deferred,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    let delta = TemporalDeltaInput {
+        action_id: "a44".to_string(),
+        changes: vec![
+            ContinuationStatusDelta {
+                continuation_id: continuation.id.clone(),
+                delta: ContinuationDelta::Create,
+            },
+            ContinuationStatusDelta {
+                continuation_id: continuation.id.clone(),
+                delta: ContinuationDelta::Split,
+            },
+        ],
+        claims_made: Vec::new(),
+        evidence: Vec::new(),
+    };
+
+    let stored = store.assimilate_delta(&delta).unwrap();
+
+    assert_eq!(store.list_temporal_deltas().unwrap(), vec![stored]);
+    let unchanged = store.get_continuation(&continuation.id).unwrap().unwrap();
+    assert_eq!(unchanged.status, ContinuationStatus::Deferred);
+}
+
+#[test]
+fn temporal_delta_rejects_missing_status_target_and_rolls_back() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_test_store(tmp.path());
+    let existing = store
+        .create_continuation(&ContinuationInput {
+            title: "existing continuation".to_string(),
+            summary: "rollback must preserve this status".to_string(),
+            continuation_type: ContinuationType::Narrative,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    let delta = TemporalDeltaInput {
+        action_id: "a45".to_string(),
+        changes: vec![
+            ContinuationStatusDelta {
+                continuation_id: existing.id.clone(),
+                delta: ContinuationDelta::Close,
+            },
+            ContinuationStatusDelta {
+                continuation_id: "missing-continuation".to_string(),
+                delta: ContinuationDelta::Advance,
+            },
+        ],
+        claims_made: Vec::new(),
+        evidence: Vec::new(),
+    };
+
+    let error = store.assimilate_delta(&delta).unwrap_err();
+
+    assert!(error.to_string().contains("missing-continuation"));
+    assert!(store.list_temporal_deltas().unwrap().is_empty());
+    let unchanged = store.get_continuation(&existing.id).unwrap().unwrap();
+    assert_eq!(unchanged.status, ContinuationStatus::Active);
 }
 
 fn open_test_store(root: &std::path::Path) -> Store {

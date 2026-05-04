@@ -1,7 +1,9 @@
 use schemars::schema_for;
 use tfk_protocol::{
-    ApiEnvelope, ContinuationInput, ContinuationStatus, ContinuationType, EventModality,
-    EventSource, EvidenceStatus, RawEventInput, StoredContinuation,
+    ApiEnvelope, CandidateAction, CommitRequest, ContinuationInput, ContinuationRelationEdge,
+    ContinuationRelationKind, ContinuationStatus, ContinuationType, EventModality, EventSource,
+    EvidenceStatus, ForecastRequest, LensCard, RawEventInput, StoredContinuation,
+    TemporalDeltaInput,
 };
 
 #[test]
@@ -83,4 +85,82 @@ fn continuation_input_defaults_legacy_missing_type_to_narrative() {
     .unwrap();
 
     assert_eq!(input.continuation_type, ContinuationType::Narrative);
+}
+
+#[test]
+fn lens_card_accepts_legacy_wire_shape_without_time_field_details() {
+    let card: LensCard = serde_json::from_value(serde_json::json!({
+        "stance": "grounded_recall",
+        "why_now": "1 matching raw event",
+        "avoid": ["do not infer closure from raw recall alone"],
+        "open_questions": ["which recalled event should become an active continuation?"]
+    }))
+    .unwrap();
+
+    assert_eq!(card.stance, "grounded_recall");
+    assert!(card.active_continuations.is_empty());
+    assert!(card.boundaries.is_empty());
+    assert!(card.preferred_action.is_none());
+    assert!(card.temporal_debt.is_none());
+}
+
+#[test]
+fn relation_forecast_commit_and_delta_wire_types_roundtrip() {
+    let relation = ContinuationRelationEdge {
+        from_id: "cont_speed".to_string(),
+        to_id: "cont_verify".to_string(),
+        kind: ContinuationRelationKind::Conflicts,
+        reason: Some("speed conflicts with verification".to_string()),
+    };
+    let relation_json = serde_json::to_value(&relation).unwrap();
+    assert_eq!(relation_json["kind"], "conflicts");
+    assert_eq!(
+        serde_json::from_value::<ContinuationRelationEdge>(relation_json).unwrap(),
+        relation
+    );
+
+    let forecast = ForecastRequest {
+        actions: vec![CandidateAction {
+            name: "verify first".to_string(),
+            continuation_id: Some("cont_verify".to_string()),
+            progress: 0.7,
+            closure: 0.5,
+            option_value_preserved: 0.8,
+            risk: 0.1,
+            irreversibility: 0.1,
+            confusion: 0.1,
+            friction: 0.2,
+            temporal_debt_added: 0.0,
+            uncertainty: 0.2,
+            externality: 0.3,
+        }],
+        relations: vec![relation],
+    };
+    let forecast_json = serde_json::to_value(&forecast).unwrap();
+    assert_eq!(forecast_json["actions"][0]["option_value_preserved"], 0.8);
+    let _: ForecastRequest = serde_json::from_value(forecast_json).unwrap();
+
+    let commit = CommitRequest {
+        speaker: "agent".to_string(),
+        statement: "I will send the draft tomorrow".to_string(),
+        scope: Some("current_project".to_string()),
+        deadline: Some("2026-05-02".to_string()),
+        revocable: true,
+    };
+    let commit_json = serde_json::to_value(&commit).unwrap();
+    assert_eq!(commit_json["revocable"], true);
+    let _: CommitRequest = serde_json::from_value(commit_json).unwrap();
+
+    let delta = TemporalDeltaInput {
+        action_id: "a42".to_string(),
+        changes: vec![tfk_protocol::ContinuationStatusDelta {
+            continuation_id: "cont_verify".to_string(),
+            delta: tfk_protocol::ContinuationDelta::Close,
+        }],
+        claims_made: Vec::new(),
+        evidence: Vec::new(),
+    };
+    let delta_json = serde_json::to_value(&delta).unwrap();
+    assert_eq!(delta_json["changes"][0]["delta"], "close");
+    let _: TemporalDeltaInput = serde_json::from_value(delta_json).unwrap();
 }
