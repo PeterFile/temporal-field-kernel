@@ -7,17 +7,21 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
-use tfk_core::{PreflightScorer, PreflightSignals};
-use tfk_protocol::{
-    ApiEnvelope, ContinuationInput, LensCard, LensRequest, ProvenanceRef, RawEventInput,
-    StoredContinuation,
+use tfk_core::{
+    ForecastScorer, PreflightScorer, PreflightSignals, TimeFieldContinuation, TimeFieldLensEngine,
 };
-use tfk_store::{Store, StoredRawEvent};
+use tfk_protocol::{
+    ApiEnvelope, CommitRequest, ContinuationInput, ContinuationStatus, ContinuationType,
+    ForecastRequest, ForecastResult, LensCard, LensRequest, ProvenanceRef, RawEventInput,
+    StoredContinuation, TemporalDeltaInput,
+};
+use tfk_store::{Store, StoreError, StoredRawEvent, StoredTemporalDelta};
 
 #[derive(Clone)]
 pub struct ApiState {
     store: Arc<Mutex<Store>>,
     preflight_scorer: PreflightScorer,
+    forecast_scorer: ForecastScorer,
 }
 
 impl ApiState {
@@ -25,6 +29,7 @@ impl ApiState {
         Self {
             store: Arc::new(Mutex::new(store)),
             preflight_scorer: PreflightScorer::with_threshold(0.5),
+            forecast_scorer: ForecastScorer,
         }
     }
 }
@@ -48,6 +53,9 @@ pub fn router_with_state(state: ApiState) -> Router {
         .route("/v1/continuations/:id", get(get_continuation_handler))
         .route("/v1/preflight", post(preflight_handler))
         .route("/v1/lens", post(lens_handler))
+        .route("/v1/forecast", post(forecast_handler))
+        .route("/v1/commit", post(commit_handler))
+        .route("/v1/assimilate", post(assimilate_handler))
         .with_state(state)
 }
 
@@ -145,6 +153,72 @@ async fn preflight_handler(
     ))
 }
 
+async fn forecast_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<ForecastRequest>,
+) -> Json<ApiEnvelope<ForecastResult>> {
+    Json(ApiEnvelope::ok(
+        "local-forecast",
+        "local-forecast",
+        state.forecast_scorer.score(&request),
+    ))
+}
+
+async fn commit_handler(
+    State(state): State<ApiState>,
+    Json(request): Json<CommitRequest>,
+) -> Result<Json<ApiEnvelope<StoredContinuation>>, ApiError> {
+    let summary = format!(
+        "speaker={}; statement={}; scope={}; deadline={}; revocable={}",
+        request.speaker,
+        request.statement,
+        request.scope.as_deref().unwrap_or("unspecified"),
+        request.deadline.as_deref().unwrap_or("unspecified"),
+        request.revocable
+    );
+    let input = ContinuationInput {
+        title: request.statement,
+        summary,
+        continuation_type: ContinuationType::Obligation,
+        status: ContinuationStatus::Active,
+        parent_id: None,
+        raw_event_id: None,
+    };
+    let stored = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .create_continuation(&input)
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-commit",
+        "local-commit",
+        stored,
+    )))
+}
+
+async fn assimilate_handler(
+    State(state): State<ApiState>,
+    Json(input): Json<TemporalDeltaInput>,
+) -> Result<Json<ApiEnvelope<StoredTemporalDelta>>, ApiError> {
+    let delta = {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|_| internal_error("store lock poisoned"))?;
+        store
+            .assimilate_delta(&input)
+            .map_err(api_error_for_store)?
+    };
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-assimilate",
+        "local-assimilate",
+        delta,
+    )))
+}
+
 async fn lens_handler(
     State(state): State<ApiState>,
     Json(request): Json<LensRequest>,
@@ -185,7 +259,21 @@ async fn lens_handler(
         }
     };
 
-    let card = lens_card(&request, continuations.len(), events.len());
+    let card = if continuations.is_empty() {
+        lens_card(&request, 0, events.len())
+    } else {
+        let time_field_continuations: Vec<_> = continuations
+            .iter()
+            .map(|continuation| TimeFieldContinuation {
+                id: continuation.id.clone(),
+                title: continuation.title.clone(),
+                summary: continuation.summary.clone(),
+                continuation_type: continuation.continuation_type,
+                status: continuation.status,
+            })
+            .collect();
+        TimeFieldLensEngine.generate(&request, &time_field_continuations, 0)
+    };
     let mut envelope = ApiEnvelope::ok("local-lens", "local-lens", card);
     envelope.provenance = if continuations.is_empty() {
         events
@@ -216,11 +304,15 @@ fn lens_card(request: &LensRequest, continuation_count: usize, raw_event_count: 
                 "{continuation_count} matching continuation(s) found for query: {}",
                 request.query
             ),
+            active_continuations: Vec::new(),
+            boundaries: Vec::new(),
             avoid: vec![
                 "do not infer closure from recall alone".to_string(),
                 "do not expand this into vector search or full Datalog".to_string(),
             ],
+            preferred_action: None,
             open_questions: vec!["what is the next concrete observation or action?".to_string()],
+            temporal_debt: None,
         };
     }
 
@@ -228,11 +320,15 @@ fn lens_card(request: &LensRequest, continuation_count: usize, raw_event_count: 
         return LensCard {
             stance: "scaffold".to_string(),
             why_now: format!("no matching raw events found for query: {}", request.query),
+            active_continuations: Vec::new(),
+            boundaries: Vec::new(),
             avoid: vec![
                 "do not invent continuity without stored evidence".to_string(),
                 "do not treat this scaffold as a full continuation graph".to_string(),
             ],
+            preferred_action: None,
             open_questions: vec!["what evidence should be observed next?".to_string()],
+            temporal_debt: None,
         };
     }
 
@@ -242,21 +338,46 @@ fn lens_card(request: &LensRequest, continuation_count: usize, raw_event_count: 
             "{raw_event_count} matching raw event(s) found for query: {}",
             request.query
         ),
+        active_continuations: Vec::new(),
+        boundaries: Vec::new(),
         avoid: vec![
             "do not infer closure from raw recall alone".to_string(),
             "do not treat this as a full continuation graph yet".to_string(),
         ],
+        preferred_action: None,
         open_questions: vec![
             "which recalled event should become an active continuation?".to_string()
         ],
+        temporal_debt: None,
     }
 }
 
 type ApiError = (StatusCode, Json<ApiEnvelope<Value>>);
 
+fn api_error_for_store(error: StoreError) -> ApiError {
+    match error {
+        StoreError::InvalidTemporalDelta(message) => invalid_request_error(message),
+        other => internal_error(other.to_string()),
+    }
+}
+
 fn internal_error(message: impl Into<String>) -> ApiError {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiEnvelope {
+            request_id: "local-error".to_string(),
+            trace_id: "local-error".to_string(),
+            ok: false,
+            data: None,
+            warnings: vec![message.into()],
+            provenance: Vec::new(),
+        }),
+    )
+}
+
+fn invalid_request_error(message: impl Into<String>) -> ApiError {
+    (
+        StatusCode::BAD_REQUEST,
         Json(ApiEnvelope {
             request_id: "local-error".to_string(),
             trace_id: "local-error".to_string(),
