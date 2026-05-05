@@ -279,6 +279,23 @@ pub struct ForecastResult {
     pub ranked_actions: Vec<RankedAction>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PreflightSignals {
+    pub uncertainty: f64,
+    pub irreversibility: f64,
+    pub externality: f64,
+    pub option_value_loss: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PreflightResult {
+    pub requires_confirmation: bool,
+    pub risk_product: f64,
+    pub threshold: f64,
+    pub reason: String,
+    pub safer_alternative: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CommitRequest {
     pub speaker: String,

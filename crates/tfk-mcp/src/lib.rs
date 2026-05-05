@@ -9,15 +9,24 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tfk_protocol::LensRequest;
+use tfk_protocol::{LensRequest, PreflightSignals};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum StdioCommand {
     Health,
-    Lens { query: String },
+    Lens {
+        query: String,
+    },
+    Preflight {
+        uncertainty: f64,
+        irreversibility: f64,
+        externality: f64,
+        #[serde(default)]
+        option_value_loss: Option<f64>,
+    },
 }
 
 impl StdioCommand {
@@ -25,6 +34,7 @@ impl StdioCommand {
         match self {
             Self::Health => "health",
             Self::Lens { .. } => "lens",
+            Self::Preflight { .. } => "preflight",
         }
     }
 }
@@ -65,6 +75,25 @@ pub fn daemon_request_for(command: &StdioCommand) -> anyhow::Result<DaemonReques
             Ok(DaemonRequest {
                 method: "POST",
                 path: "/v1/lens",
+                body: serde_json::to_vec(&request)?,
+            })
+        }
+        StdioCommand::Preflight {
+            uncertainty,
+            irreversibility,
+            externality,
+            option_value_loss,
+        } => {
+            let request = PreflightSignals {
+                uncertainty: *uncertainty,
+                irreversibility: *irreversibility,
+                externality: *externality,
+                option_value_loss: option_value_loss.unwrap_or(0.0),
+            };
+
+            Ok(DaemonRequest {
+                method: "POST",
+                path: "/v1/preflight",
                 body: serde_json::to_vec(&request)?,
             })
         }

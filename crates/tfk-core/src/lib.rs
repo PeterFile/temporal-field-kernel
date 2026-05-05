@@ -1,9 +1,9 @@
-use serde::{Deserialize, Serialize};
 use tfk_protocol::{
     ContinuationDelta, ContinuationRelationEdge, ContinuationRelationKind, ContinuationStatus,
     ContinuationType, ForecastRequest, ForecastResult, LensActiveContinuation, LensBoundary,
     LensCard, LensPreferredAction, LensRequest, RankedAction, TemporalDebtWarning,
 };
+pub use tfk_protocol::{PreflightResult, PreflightSignals};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimeFieldContinuation {
@@ -491,23 +491,6 @@ fn has_progress_risk_conflict(active: &[LensActiveContinuation]) -> bool {
         .iter()
         .any(|continuation| continuation.continuation_type == ContinuationType::Risk);
     has_progress && has_risk
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PreflightSignals {
-    pub uncertainty: f64,
-    pub irreversibility: f64,
-    pub externality: f64,
-    pub option_value_loss: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PreflightResult {
-    pub requires_confirmation: bool,
-    pub risk_product: f64,
-    pub threshold: f64,
-    pub reason: String,
-    pub safer_alternative: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
