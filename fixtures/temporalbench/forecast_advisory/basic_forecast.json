@@ -1,0 +1,47 @@
+{
+  "request": {
+    "actions": [
+      {
+        "name": "ship now",
+        "continuation_id": null,
+        "progress": 0.9,
+        "closure": 0.2,
+        "option_value_preserved": 0.1,
+        "risk": 0.8,
+        "irreversibility": 0.8,
+        "confusion": 0.4,
+        "friction": 0.3,
+        "temporal_debt_added": 0.6,
+        "uncertainty": 0.8,
+        "externality": 0.8
+      },
+      {
+        "name": "verify then ship",
+        "continuation_id": null,
+        "progress": 0.7,
+        "closure": 0.6,
+        "option_value_preserved": 0.8,
+        "risk": 0.1,
+        "irreversibility": 0.1,
+        "confusion": 0.1,
+        "friction": 0.2,
+        "temporal_debt_added": 0.0,
+        "uncertainty": 0.2,
+        "externality": 0.3
+      }
+    ],
+    "relations": []
+  },
+  "expected_top_action": "verify then ship",
+  "expected_advisory_signal_count": 1,
+  "expected_advisory_signal_names": ["forming_future_risk"],
+  "advisory_signals": [
+    {
+      "name": "forming_future_risk",
+      "model": "fixture-static",
+      "confidence": 0.8,
+      "action_name": "verify then ship",
+      "reason": "unresolved risk may change the forming future"
+    }
+  ]
+}

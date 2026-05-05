@@ -275,8 +275,21 @@ pub struct RankedAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AdvisoryForecastSignal {
+    pub name: String,
+    pub model: String,
+    pub confidence: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ForecastResult {
     pub ranked_actions: Vec<RankedAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisory_signals: Vec<AdvisoryForecastSignal>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]

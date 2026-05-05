@@ -582,7 +582,10 @@ impl ForecastScorer {
             })
             .collect();
         ranked_actions.sort_by(|left, right| right.score.total_cmp(&left.score));
-        ForecastResult { ranked_actions }
+        ForecastResult {
+            ranked_actions,
+            advisory_signals: Vec::new(),
+        }
     }
 }
 

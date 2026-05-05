@@ -8,6 +8,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 use tfk_core::{ForecastScorer, PreflightScorer, TimeFieldContinuation, TimeFieldLensEngine};
+use tfk_model_client::ForecastPredictionClient;
 use tfk_protocol::{
     ApiEnvelope, CommitRequest, ContinuationInput, ContinuationStatus, ContinuationType,
     ForecastRequest, ForecastResult, LensCard, LensRequest, PreflightResult, PreflightSignals,
@@ -20,6 +21,7 @@ pub struct ApiState {
     store: Arc<Mutex<Store>>,
     preflight_scorer: PreflightScorer,
     forecast_scorer: ForecastScorer,
+    forecast_client: Option<Arc<dyn ForecastPredictionClient>>,
 }
 
 impl ApiState {
@@ -28,7 +30,13 @@ impl ApiState {
             store: Arc::new(Mutex::new(store)),
             preflight_scorer: PreflightScorer::with_threshold(0.5),
             forecast_scorer: ForecastScorer,
+            forecast_client: None,
         }
+    }
+
+    pub fn with_forecast_client(mut self, client: impl ForecastPredictionClient + 'static) -> Self {
+        self.forecast_client = Some(Arc::new(client));
+        self
     }
 }
 
@@ -156,11 +164,24 @@ async fn forecast_handler(
     State(state): State<ApiState>,
     Json(request): Json<ForecastRequest>,
 ) -> Json<ApiEnvelope<ForecastResult>> {
-    Json(ApiEnvelope::ok(
-        "local-forecast",
-        "local-forecast",
-        state.forecast_scorer.score(&request),
-    ))
+    let mut result = state.forecast_scorer.score(&request);
+    let mut warnings = Vec::new();
+
+    if let Some(client) = &state.forecast_client {
+        match client.forecast(&request) {
+            Ok(signals) => {
+                result.advisory_signals.extend(signals);
+            }
+            Err(error) => warnings.push(format!(
+                "forecast advisory model failed; deterministic result returned: {error}"
+            )),
+        }
+    }
+
+    let mut envelope = ApiEnvelope::ok("local-forecast", "local-forecast", result);
+    envelope.warnings = warnings;
+
+    Json(envelope)
 }
 
 async fn commit_handler(
