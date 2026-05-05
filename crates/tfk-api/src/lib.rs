@@ -13,7 +13,7 @@ use tfk_core::{
 use tfk_protocol::{
     ApiEnvelope, CommitRequest, ContinuationInput, ContinuationStatus, ContinuationType,
     ForecastRequest, ForecastResult, LensCard, LensRequest, ProvenanceRef, RawEventInput,
-    StoredContinuation, TemporalDeltaInput,
+    StoredCommitment, StoredContinuation, TemporalDeltaInput,
 };
 use tfk_store::{Store, StoreError, StoredRawEvent, StoredTemporalDelta};
 
@@ -55,6 +55,7 @@ pub fn router_with_state(state: ApiState) -> Router {
         .route("/v1/lens", post(lens_handler))
         .route("/v1/forecast", post(forecast_handler))
         .route("/v1/commit", post(commit_handler))
+        .route("/v1/commitments", get(list_commitments_handler))
         .route("/v1/assimilate", post(assimilate_handler))
         .with_state(state)
 }
@@ -177,7 +178,7 @@ async fn commit_handler(
         request.revocable
     );
     let input = ContinuationInput {
-        title: request.statement,
+        title: request.statement.clone(),
         summary,
         continuation_type: ContinuationType::Obligation,
         status: ContinuationStatus::Active,
@@ -190,11 +191,34 @@ async fn commit_handler(
         .map_err(|_| internal_error("store lock poisoned"))?
         .create_continuation(&input)
         .map_err(|error| internal_error(error.to_string()))?;
+    state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .create_commitment(&request, &stored.id)
+        .map_err(|error| internal_error(error.to_string()))?;
 
     Ok(Json(ApiEnvelope::ok(
         "local-commit",
         "local-commit",
         stored,
+    )))
+}
+
+async fn list_commitments_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<ApiEnvelope<Vec<StoredCommitment>>>, ApiError> {
+    let commitments = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .list_active_commitments()
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-commitment-list",
+        "local-commitment-list",
+        commitments,
     )))
 }
 
@@ -223,7 +247,7 @@ async fn lens_handler(
     State(state): State<ApiState>,
     Json(request): Json<LensRequest>,
 ) -> Result<Json<ApiEnvelope<LensCard>>, ApiError> {
-    let (continuations, events) = {
+    let (continuations, events, commitment_constraints) = {
         let store = state
             .store
             .lock()
@@ -240,8 +264,37 @@ async fn lens_handler(
                 continuations.push(continuation);
             }
         }
+        let continuation_ids: Vec<_> = continuations
+            .iter()
+            .map(|continuation| continuation.id.clone())
+            .collect();
+        let mut commitment_constraints = store
+            .active_commitments_for_continuations(&continuation_ids)
+            .map_err(|error| internal_error(error.to_string()))?;
+        for commitment in store
+            .search_active_commitments(&request.query)
+            .map_err(|error| internal_error(error.to_string()))?
+        {
+            if !commitment_constraints
+                .iter()
+                .any(|stored| stored.id == commitment.id)
+            {
+                if let Some(continuation) = store
+                    .get_continuation(&commitment.continuation_id)
+                    .map_err(|error| internal_error(error.to_string()))?
+                {
+                    if !continuations
+                        .iter()
+                        .any(|stored| stored.id == continuation.id)
+                    {
+                        continuations.push(continuation);
+                    }
+                }
+                commitment_constraints.push(commitment);
+            }
+        }
         if !continuations.is_empty() {
-            (continuations, Vec::new())
+            (continuations, Vec::new(), commitment_constraints)
         } else {
             let hits = store
                 .search_raw_events(&request.query)
@@ -255,11 +308,11 @@ async fn lens_handler(
                     events.push(event);
                 }
             }
-            (continuations, events)
+            (continuations, events, Vec::new())
         }
     };
 
-    let card = if continuations.is_empty() {
+    let mut card = if continuations.is_empty() {
         lens_card(&request, 0, events.len())
     } else {
         let time_field_continuations: Vec<_> = continuations
@@ -274,6 +327,11 @@ async fn lens_handler(
             .collect();
         TimeFieldLensEngine.generate(&request, &time_field_continuations, 0)
     };
+    if !commitment_constraints.is_empty() {
+        card.commitment_constraints = commitment_constraints;
+        card.avoid
+            .push("do not violate explicit commitment constraints".to_string());
+    }
     let mut envelope = ApiEnvelope::ok("local-lens", "local-lens", card);
     envelope.provenance = if continuations.is_empty() {
         events
@@ -305,6 +363,7 @@ fn lens_card(request: &LensRequest, continuation_count: usize, raw_event_count: 
                 request.query
             ),
             active_continuations: Vec::new(),
+            commitment_constraints: Vec::new(),
             boundaries: Vec::new(),
             avoid: vec![
                 "do not infer closure from recall alone".to_string(),
@@ -321,6 +380,7 @@ fn lens_card(request: &LensRequest, continuation_count: usize, raw_event_count: 
             stance: "scaffold".to_string(),
             why_now: format!("no matching raw events found for query: {}", request.query),
             active_continuations: Vec::new(),
+            commitment_constraints: Vec::new(),
             boundaries: Vec::new(),
             avoid: vec![
                 "do not invent continuity without stored evidence".to_string(),
@@ -339,6 +399,7 @@ fn lens_card(request: &LensRequest, continuation_count: usize, raw_event_count: 
             request.query
         ),
         active_continuations: Vec::new(),
+        commitment_constraints: Vec::new(),
         boundaries: Vec::new(),
         avoid: vec![
             "do not infer closure from raw recall alone".to_string(),

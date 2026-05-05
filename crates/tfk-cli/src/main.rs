@@ -36,6 +36,11 @@ enum Command {
         #[command(subcommand)]
         command: ContinuationCommand,
     },
+    /// List active commitments through the local tfkd daemon.
+    Commitment {
+        #[command(subcommand)]
+        command: CommitmentCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -60,6 +65,12 @@ enum ContinuationCommand {
     List,
     /// Get one stored continuation.
     Get { id: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum CommitmentCommand {
+    /// List active structured commitments.
+    List,
 }
 
 #[tokio::main]
@@ -124,6 +135,13 @@ async fn main() -> anyhow::Result<()> {
             ContinuationCommand::Get { id } => {
                 let path = continuation_get_path(&id)?;
                 let response = tfk_cli::request_over_uds(&socket_path, "GET", &path, b"").await?;
+                print_json(&response)?;
+            }
+        },
+        Command::Commitment { command } => match command {
+            CommitmentCommand::List => {
+                let response =
+                    tfk_cli::request_over_uds(&socket_path, "GET", "/v1/commitments", b"").await?;
                 print_json(&response)?;
             }
         },
@@ -292,5 +310,17 @@ mod tests {
         let error = continuation_get_path("cont_1\r\nX-Bad: true").unwrap_err();
 
         assert!(error.to_string().contains("invalid continuation id"));
+    }
+
+    #[test]
+    fn parses_commitment_list_command() {
+        let cli = Cli::parse_from(["tfk", "commitment", "list"]);
+
+        assert!(matches!(
+            cli.command,
+            Command::Commitment {
+                command: CommitmentCommand::List
+            }
+        ));
     }
 }

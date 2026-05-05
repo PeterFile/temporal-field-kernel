@@ -28,6 +28,7 @@ cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock observe --session s1 --adapter cl
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock continuation create --summary "继续跟踪这个判断" "项目状态机不是目标"
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock continuation list
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock continuation get cont_...
+cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock commitment list
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock lens "项目状态机"
 ```
 

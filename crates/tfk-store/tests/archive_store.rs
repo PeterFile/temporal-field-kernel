@@ -3,8 +3,8 @@ use std::os::unix::fs::PermissionsExt as _;
 
 use tempfile::tempdir;
 use tfk_protocol::{
-    ContinuationDelta, ContinuationInput, ContinuationStatus, ContinuationStatusDelta,
-    ContinuationType, EventSource, RawEventInput, TemporalDeltaInput,
+    CommitRequest, ContinuationDelta, ContinuationInput, ContinuationStatus,
+    ContinuationStatusDelta, ContinuationType, EventSource, RawEventInput, TemporalDeltaInput,
 };
 use tfk_store::Store;
 
@@ -273,6 +273,71 @@ fn temporal_delta_is_appended_and_assimilates_status_updates() {
     let updated = store.get_continuation(&created.id).unwrap().unwrap();
     assert_eq!(updated.status, ContinuationStatus::Closed);
     assert_eq!(store.list_temporal_deltas().unwrap(), vec![stored_delta]);
+}
+
+#[test]
+fn commitment_create_reopen_and_active_filtering_uses_linked_continuation_status() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let db_path = data_dir.join("tfk.db");
+    let archive_dir = data_dir.join("archive");
+    let (commitment_id, continuation_id) = {
+        let store = Store::open(&db_path, &archive_dir).unwrap();
+        let continuation = store
+            .create_continuation(&ContinuationInput {
+                title: "send the draft".to_string(),
+                summary: "commitment continuation".to_string(),
+                continuation_type: ContinuationType::Obligation,
+                status: ContinuationStatus::Active,
+                parent_id: None,
+                raw_event_id: None,
+            })
+            .unwrap();
+        let commitment = store
+            .create_commitment(
+                &CommitRequest {
+                    speaker: "agent".to_string(),
+                    statement: "send the draft".to_string(),
+                    scope: Some("current_project".to_string()),
+                    deadline: Some("2026-05-02".to_string()),
+                    revocable: false,
+                },
+                &continuation.id,
+            )
+            .unwrap();
+
+        assert!(commitment.id.starts_with("commit_"));
+        assert_eq!(commitment.continuation_id, continuation.id);
+        assert_eq!(commitment.speaker, "agent");
+        assert_eq!(commitment.statement, "send the draft");
+        assert_eq!(commitment.scope.as_deref(), Some("current_project"));
+        assert_eq!(commitment.deadline.as_deref(), Some("2026-05-02"));
+        assert!(!commitment.revocable);
+        assert_eq!(commitment.status, ContinuationStatus::Active);
+        (commitment.id, continuation.id)
+    };
+
+    let reopened = Store::open(&db_path, &archive_dir).unwrap();
+    let active = reopened.list_active_commitments().unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, commitment_id);
+
+    let matching = reopened.search_active_commitments("draft").unwrap();
+    assert_eq!(matching, active);
+
+    let mut reopened = reopened;
+    reopened
+        .assimilate_delta(&TemporalDeltaInput {
+            action_id: "a-close".to_string(),
+            changes: vec![ContinuationStatusDelta {
+                continuation_id,
+                delta: ContinuationDelta::Close,
+            }],
+            claims_made: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .unwrap();
+    assert!(reopened.list_active_commitments().unwrap().is_empty());
 }
 
 #[test]

@@ -248,15 +248,22 @@ fn forecast_ranks_high_progress_low_risk_action_first() {
 }
 
 #[test]
-fn closed_continuations_do_not_create_pressure_or_fake_action() {
+fn inactive_continuations_do_not_create_pressure_or_fake_action() {
     let request = lens_request("项目状态机");
-    let candidates = vec![TimeFieldContinuation {
-        id: "cont_closed".to_string(),
+    let candidates: Vec<_> = [
+        ContinuationStatus::Closed,
+        ContinuationStatus::Retired,
+        ContinuationStatus::Stabilized,
+    ]
+    .into_iter()
+    .map(|status| TimeFieldContinuation {
+        id: format!("cont_{status:?}"),
         title: "项目状态机不是目标".to_string(),
         summary: "already resolved".to_string(),
         continuation_type: ContinuationType::Obligation,
-        status: ContinuationStatus::Closed,
-    }];
+        status,
+    })
+    .collect();
 
     let card = TimeFieldLensEngine.generate(&request, &candidates, 0);
 
