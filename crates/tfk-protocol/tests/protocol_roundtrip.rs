@@ -2,8 +2,8 @@ use schemars::schema_for;
 use tfk_protocol::{
     ApiEnvelope, CandidateAction, CommitRequest, ContinuationInput, ContinuationRelationEdge,
     ContinuationRelationKind, ContinuationStatus, ContinuationType, EventModality, EventSource,
-    EvidenceStatus, ForecastRequest, LensCard, PreflightResult, PreflightSignals, RawEventInput,
-    StoredCommitment, StoredContinuation, TemporalDeltaInput,
+    EvidenceStatus, ForecastRequest, ForecastResult, LensCard, PreflightResult, PreflightSignals,
+    RankedAction, RawEventInput, StoredCommitment, StoredContinuation, TemporalDeltaInput,
 };
 
 #[test]
@@ -181,6 +181,49 @@ fn preflight_wire_types_roundtrip_with_stable_json_shape() {
         serde_json::from_value::<PreflightResult>(result_json).unwrap(),
         result
     );
+}
+
+#[test]
+fn forecast_result_accepts_legacy_shape_without_advisory_signals() {
+    let result: ForecastResult = serde_json::from_value(serde_json::json!({
+        "ranked_actions": [{
+            "name": "verify first",
+            "score": 1.7,
+            "requires_confirmation": false,
+            "ask_before_act": false,
+            "reason": "deterministic"
+        }]
+    }))
+    .unwrap();
+
+    assert_eq!(result.ranked_actions[0].name, "verify first");
+    assert!(result.advisory_signals.is_empty());
+}
+
+#[test]
+fn forecast_result_roundtrips_advisory_signals() {
+    let result = ForecastResult {
+        ranked_actions: vec![RankedAction {
+            name: "verify first".to_string(),
+            score: 1.7,
+            requires_confirmation: false,
+            ask_before_act: false,
+            reason: "deterministic".to_string(),
+        }],
+        advisory_signals: vec![tfk_protocol::AdvisoryForecastSignal {
+            name: "forming_future_risk".to_string(),
+            model: "static-test".to_string(),
+            confidence: 0.8,
+            action_name: Some("verify first".to_string()),
+            reason: Some("model sees unresolved risk".to_string()),
+        }],
+    };
+
+    let json = serde_json::to_value(&result).unwrap();
+    assert_eq!(json["advisory_signals"][0]["name"], "forming_future_risk");
+
+    let decoded: ForecastResult = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded, result);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use tfk_eval::replay_fixture;
+use tfk_eval::{replay_fixture, replay_forecast_fixture};
 
 #[derive(Debug, Parser)]
 #[command(name = "tfk-eval", about = "TemporalBench fixture runner")]
@@ -19,6 +19,10 @@ enum Command {
         #[arg(long)]
         query: String,
     },
+    Forecast {
+        #[arg(long)]
+        fixture: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -26,6 +30,10 @@ fn main() -> anyhow::Result<()> {
         Command::ListFixtures => println!("fixtures/temporalbench"),
         Command::Replay { fixture, query } => {
             let summary = replay_fixture(&fixture, &query)?;
+            println!("{}", serde_json::to_string(&summary)?);
+        }
+        Command::Forecast { fixture } => {
+            let summary = replay_forecast_fixture(&fixture)?;
             println!("{}", serde_json::to_string(&summary)?);
         }
     }

@@ -4,7 +4,11 @@ use std::path::Path;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use tfk_protocol::{EventModality, EventSource, EvidenceStatus, RawEventInput};
+use tfk_core::ForecastScorer;
+use tfk_protocol::{
+    AdvisoryForecastSignal, EventModality, EventSource, EvidenceStatus, ForecastRequest,
+    RawEventInput,
+};
 use tfk_store::Store;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +16,16 @@ pub struct ReplaySummary {
     pub fixture_path: String,
     pub ingested_count: usize,
     pub hit_count: usize,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForecastReplaySummary {
+    pub fixture_path: String,
+    pub top_action: String,
+    pub expected_top_action: String,
+    pub advisory_signal_count: usize,
+    pub advisory_signal_names: Vec<String>,
     pub ok: bool,
 }
 
@@ -75,6 +89,56 @@ pub fn replay_fixture(path: &Path, query: &str) -> anyhow::Result<ReplaySummary>
         hit_count,
         ok: hit_count > 0,
     })
+}
+
+pub fn replay_forecast_fixture(path: &Path) -> anyhow::Result<ForecastReplaySummary> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
+    let fixture: ForecastFixture = serde_json::from_reader(file)
+        .with_context(|| format!("invalid fixture {}", path.display()))?;
+    let result = ForecastScorer.score(&fixture.request);
+    let top_action = result
+        .ranked_actions
+        .first()
+        .map(|action| action.name.clone())
+        .unwrap_or_default();
+    let advisory_signal_names: Vec<_> = fixture
+        .advisory_signals
+        .iter()
+        .map(|signal| signal.name.clone())
+        .collect();
+    let expected_count = fixture
+        .expected_advisory_signal_count
+        .unwrap_or(advisory_signal_names.len());
+    let expected_names = if fixture.expected_advisory_signal_names.is_empty() {
+        advisory_signal_names.clone()
+    } else {
+        fixture.expected_advisory_signal_names
+    };
+    let ok = top_action == fixture.expected_top_action
+        && advisory_signal_names.len() == expected_count
+        && advisory_signal_names == expected_names;
+
+    Ok(ForecastReplaySummary {
+        fixture_path: path.to_string_lossy().to_string(),
+        top_action,
+        expected_top_action: fixture.expected_top_action,
+        advisory_signal_count: advisory_signal_names.len(),
+        advisory_signal_names,
+        ok,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct ForecastFixture {
+    request: ForecastRequest,
+    expected_top_action: String,
+    #[serde(default)]
+    advisory_signals: Vec<AdvisoryForecastSignal>,
+    #[serde(default)]
+    expected_advisory_signal_count: Option<usize>,
+    #[serde(default)]
+    expected_advisory_signal_names: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

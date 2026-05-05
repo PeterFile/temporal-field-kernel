@@ -3,11 +3,12 @@ use axum::{
     http::{Request, StatusCode},
 };
 use tempfile::tempdir;
+use tfk_model_client::{ForecastPredictionClient, ModelClientError, StaticForecastClient};
 use tfk_protocol::{
-    ApiEnvelope, CandidateAction, CommitRequest, ContinuationDelta, ContinuationInput,
-    ContinuationStatus, ContinuationStatusDelta, ContinuationType, EventSource, ForecastRequest,
-    ForecastResult, LensCard, LensRequest, PreflightResult, PreflightSignals, RawEventInput,
-    StoredCommitment, StoredContinuation, TemporalDeltaInput,
+    AdvisoryForecastSignal, ApiEnvelope, CandidateAction, CommitRequest, ContinuationDelta,
+    ContinuationInput, ContinuationStatus, ContinuationStatusDelta, ContinuationType, EventSource,
+    ForecastRequest, ForecastResult, LensCard, LensRequest, PreflightResult, PreflightSignals,
+    RawEventInput, StoredCommitment, StoredContinuation, TemporalDeltaInput,
 };
 use tfk_store::{Store, StoredRawEvent};
 use tower::ServiceExt;
@@ -129,6 +130,73 @@ async fn forecast_endpoint_returns_ranked_candidate_actions() {
     let result = envelope.data.unwrap();
     assert_eq!(result.ranked_actions[0].name, "verify then ship");
     assert!(result.ranked_actions[1].requires_confirmation);
+    assert!(result.advisory_signals.is_empty());
+    assert!(envelope.warnings.is_empty());
+}
+
+#[tokio::test]
+async fn forecast_endpoint_appends_injected_advisory_signals() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let client = StaticForecastClient::new(vec![AdvisoryForecastSignal {
+        name: "forming_future_risk".to_string(),
+        model: "static-test".to_string(),
+        confidence: 0.8,
+        action_name: Some("verify then ship".to_string()),
+        reason: Some("unresolved risk".to_string()),
+    }]);
+    let app =
+        tfk_api::router_with_state(tfk_api::ApiState::new(store).with_forecast_client(client));
+
+    let response = app
+        .oneshot(json_request("POST", "/v1/forecast", &forecast_request()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<ForecastResult> = read_json(response).await;
+    let result = envelope.data.unwrap();
+    assert_eq!(result.ranked_actions[0].name, "verify then ship");
+    assert_eq!(result.advisory_signals.len(), 1);
+    assert_eq!(result.advisory_signals[0].name, "forming_future_risk");
+    assert!(envelope.warnings.is_empty());
+}
+
+#[tokio::test]
+async fn forecast_endpoint_keeps_deterministic_result_when_model_fails() {
+    struct FailingClient;
+
+    impl ForecastPredictionClient for FailingClient {
+        fn forecast(
+            &self,
+            _request: &ForecastRequest,
+        ) -> Result<Vec<AdvisoryForecastSignal>, ModelClientError> {
+            Err(ModelClientError::PredictionFailed(
+                "sidecar down".to_string(),
+            ))
+        }
+    }
+
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_state(
+        tfk_api::ApiState::new(store).with_forecast_client(FailingClient),
+    );
+
+    let response = app
+        .oneshot(json_request("POST", "/v1/forecast", &forecast_request()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<ForecastResult> = read_json(response).await;
+    let result = envelope.data.unwrap();
+    assert_eq!(result.ranked_actions[0].name, "verify then ship");
+    assert!(result.advisory_signals.is_empty());
+    assert!(envelope
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("forecast advisory model failed")));
 }
 
 #[tokio::test]
@@ -504,6 +572,42 @@ async fn assimilate_endpoint_rejects_missing_status_target() {
 fn open_test_store(root: &std::path::Path) -> Store {
     let data_dir = root.join("data");
     Store::open(data_dir.join("tfk.db"), data_dir.join("archive")).unwrap()
+}
+
+fn forecast_request() -> ForecastRequest {
+    ForecastRequest {
+        actions: vec![
+            CandidateAction {
+                name: "ship now".to_string(),
+                continuation_id: None,
+                progress: 0.9,
+                closure: 0.2,
+                option_value_preserved: 0.1,
+                risk: 0.8,
+                irreversibility: 0.8,
+                confusion: 0.4,
+                friction: 0.3,
+                temporal_debt_added: 0.6,
+                uncertainty: 0.8,
+                externality: 0.8,
+            },
+            CandidateAction {
+                name: "verify then ship".to_string(),
+                continuation_id: None,
+                progress: 0.7,
+                closure: 0.6,
+                option_value_preserved: 0.8,
+                risk: 0.1,
+                irreversibility: 0.1,
+                confusion: 0.1,
+                friction: 0.2,
+                temporal_debt_added: 0.0,
+                uncertainty: 0.2,
+                externality: 0.3,
+            },
+        ],
+        relations: Vec::new(),
+    }
 }
 
 fn json_request<T: serde::Serialize>(method: &str, uri: &str, body: &T) -> Request<Body> {
