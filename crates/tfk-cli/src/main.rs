@@ -4,7 +4,7 @@ use anyhow::bail;
 use clap::{Parser, Subcommand};
 use tfk_protocol::{
     ContinuationInput, ContinuationStatus, ContinuationType, EventSource, LensRequest,
-    RawEventInput,
+    PreflightSignals, RawEventInput,
 };
 
 #[derive(Debug, Parser)]
@@ -31,6 +31,17 @@ enum Command {
     },
     /// Request a minimal lens card from the local tfkd daemon.
     Lens { query: String },
+    /// Check deterministic path-choice risk through the local tfkd daemon.
+    Preflight {
+        #[arg(long)]
+        uncertainty: f64,
+        #[arg(long)]
+        irreversibility: f64,
+        #[arg(long)]
+        externality: f64,
+        #[arg(long, default_value_t = 0.0)]
+        option_value_loss: f64,
+    },
     /// Create or list continuations through the local tfkd daemon.
     Continuation {
         #[command(subcommand)]
@@ -104,6 +115,22 @@ async fn main() -> anyhow::Result<()> {
             let response = tfk_cli::request_json_over_uds(&socket_path, "/v1/lens", &body).await?;
             print_json(&response)?;
         }
+        Command::Preflight {
+            uncertainty,
+            irreversibility,
+            externality,
+            option_value_loss,
+        } => {
+            let body = preflight_request_body(
+                uncertainty,
+                irreversibility,
+                externality,
+                option_value_loss,
+            )?;
+            let response =
+                tfk_cli::request_json_over_uds(&socket_path, "/v1/preflight", &body).await?;
+            print_json(&response)?;
+        }
         Command::Continuation { command } => match command {
             ContinuationCommand::Create {
                 title,
@@ -172,6 +199,20 @@ fn continuation_get_path(id: &str) -> anyhow::Result<String> {
         bail!("invalid continuation id");
     }
     Ok(format!("/v1/continuations/{id}"))
+}
+
+fn preflight_request_body(
+    uncertainty: f64,
+    irreversibility: f64,
+    externality: f64,
+    option_value_loss: f64,
+) -> anyhow::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&PreflightSignals {
+        uncertainty,
+        irreversibility,
+        externality,
+        option_value_loss,
+    })?)
 }
 
 #[cfg(test)]
@@ -303,6 +344,48 @@ mod tests {
             } => assert_eq!(id, "cont_abc123"),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_preflight_command() {
+        let cli = Cli::parse_from([
+            "tfk",
+            "preflight",
+            "--uncertainty",
+            "0.9",
+            "--irreversibility",
+            "0.8",
+            "--externality",
+            "0.7",
+            "--option-value-loss",
+            "0.1",
+        ]);
+
+        match cli.command {
+            Command::Preflight {
+                uncertainty,
+                irreversibility,
+                externality,
+                option_value_loss,
+            } => {
+                assert_eq!(uncertainty, 0.9);
+                assert_eq!(irreversibility, 0.8);
+                assert_eq!(externality, 0.7);
+                assert_eq!(option_value_loss, 0.1);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preflight_request_body_defaults_option_value_loss() {
+        let body = preflight_request_body(0.9, 0.8, 0.7, 0.0).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["uncertainty"], 0.9);
+        assert_eq!(json["irreversibility"], 0.8);
+        assert_eq!(json["externality"], 0.7);
+        assert_eq!(json["option_value_loss"], 0.0);
     }
 
     #[test]

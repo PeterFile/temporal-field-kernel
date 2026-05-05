@@ -3,12 +3,11 @@ use axum::{
     http::{Request, StatusCode},
 };
 use tempfile::tempdir;
-use tfk_core::{PreflightResult, PreflightSignals};
 use tfk_protocol::{
     ApiEnvelope, CandidateAction, CommitRequest, ContinuationDelta, ContinuationInput,
     ContinuationStatus, ContinuationStatusDelta, ContinuationType, EventSource, ForecastRequest,
-    ForecastResult, LensCard, LensRequest, RawEventInput, StoredCommitment, StoredContinuation,
-    TemporalDeltaInput,
+    ForecastResult, LensCard, LensRequest, PreflightResult, PreflightSignals, RawEventInput,
+    StoredCommitment, StoredContinuation, TemporalDeltaInput,
 };
 use tfk_store::{Store, StoredRawEvent};
 use tower::ServiceExt;

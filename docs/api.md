@@ -96,6 +96,12 @@ Returns the deterministic scorer result. Current rule:
 requires_confirmation = uncertainty * irreversibility * externality > 0.5
 ```
 
+Smoke:
+
+```bash
+tfk preflight --uncertainty 0.9 --irreversibility 0.8 --externality 0.7
+```
+
 ### POST /v1/lens
 
 Accepts `LensRequest`:

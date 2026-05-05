@@ -7,13 +7,11 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
-use tfk_core::{
-    ForecastScorer, PreflightScorer, PreflightSignals, TimeFieldContinuation, TimeFieldLensEngine,
-};
+use tfk_core::{ForecastScorer, PreflightScorer, TimeFieldContinuation, TimeFieldLensEngine};
 use tfk_protocol::{
     ApiEnvelope, CommitRequest, ContinuationInput, ContinuationStatus, ContinuationType,
-    ForecastRequest, ForecastResult, LensCard, LensRequest, ProvenanceRef, RawEventInput,
-    StoredCommitment, StoredContinuation, TemporalDeltaInput,
+    ForecastRequest, ForecastResult, LensCard, LensRequest, PreflightResult, PreflightSignals,
+    ProvenanceRef, RawEventInput, StoredCommitment, StoredContinuation, TemporalDeltaInput,
 };
 use tfk_store::{Store, StoreError, StoredRawEvent, StoredTemporalDelta};
 
@@ -146,7 +144,7 @@ async fn get_continuation_handler(
 async fn preflight_handler(
     State(state): State<ApiState>,
     Json(signals): Json<PreflightSignals>,
-) -> Json<ApiEnvelope<tfk_core::PreflightResult>> {
+) -> Json<ApiEnvelope<PreflightResult>> {
     Json(ApiEnvelope::ok(
         "local-preflight",
         "local-preflight",

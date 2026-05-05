@@ -2,8 +2,8 @@ use schemars::schema_for;
 use tfk_protocol::{
     ApiEnvelope, CandidateAction, CommitRequest, ContinuationInput, ContinuationRelationEdge,
     ContinuationRelationKind, ContinuationStatus, ContinuationType, EventModality, EventSource,
-    EvidenceStatus, ForecastRequest, LensCard, RawEventInput, StoredCommitment, StoredContinuation,
-    TemporalDeltaInput,
+    EvidenceStatus, ForecastRequest, LensCard, PreflightResult, PreflightSignals, RawEventInput,
+    StoredCommitment, StoredContinuation, TemporalDeltaInput,
 };
 
 #[test]
@@ -142,6 +142,45 @@ fn commitment_wire_types_roundtrip_and_lens_field_is_optional() {
     assert_eq!(card.commitment_constraints[0].continuation_id, "cont_1");
     let _commitment_schema = schema_for!(StoredCommitment);
     let _lens_schema = schema_for!(LensCard);
+}
+
+#[test]
+fn preflight_wire_types_roundtrip_with_stable_json_shape() {
+    let signals = PreflightSignals {
+        uncertainty: 0.9,
+        irreversibility: 0.8,
+        externality: 0.7,
+        option_value_loss: 0.1,
+    };
+    let signals_json = serde_json::to_value(signals).unwrap();
+
+    assert_eq!(signals_json["uncertainty"], 0.9);
+    assert_eq!(signals_json["irreversibility"], 0.8);
+    assert_eq!(signals_json["externality"], 0.7);
+    assert_eq!(signals_json["option_value_loss"], 0.1);
+    assert_eq!(
+        serde_json::from_value::<PreflightSignals>(signals_json).unwrap(),
+        signals
+    );
+
+    let result = PreflightResult {
+        requires_confirmation: true,
+        risk_product: 0.504,
+        threshold: 0.5,
+        reason: "uncertainty * irreversibility * externality exceeds threshold".to_string(),
+        safer_alternative: Some(
+            "ask for confirmation or produce a reversible draft/dry-run".to_string(),
+        ),
+    };
+    let result_json = serde_json::to_value(&result).unwrap();
+
+    assert_eq!(result_json["requires_confirmation"], true);
+    assert_eq!(result_json["risk_product"], 0.504);
+    assert_eq!(result_json["threshold"], 0.5);
+    assert_eq!(
+        serde_json::from_value::<PreflightResult>(result_json).unwrap(),
+        result
+    );
 }
 
 #[test]
