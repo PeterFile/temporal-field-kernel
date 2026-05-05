@@ -7,7 +7,8 @@ use tfk_core::{PreflightResult, PreflightSignals};
 use tfk_protocol::{
     ApiEnvelope, CandidateAction, CommitRequest, ContinuationDelta, ContinuationInput,
     ContinuationStatus, ContinuationStatusDelta, ContinuationType, EventSource, ForecastRequest,
-    ForecastResult, LensCard, LensRequest, RawEventInput, StoredContinuation, TemporalDeltaInput,
+    ForecastResult, LensCard, LensRequest, RawEventInput, StoredCommitment, StoredContinuation,
+    TemporalDeltaInput,
 };
 use tfk_store::{Store, StoredRawEvent};
 use tower::ServiceExt;
@@ -334,6 +335,88 @@ async fn commit_endpoint_creates_active_obligation_continuation() {
     assert!(continuation.summary.contains("scope=current_project"));
     assert!(continuation.summary.contains("deadline=2026-05-02"));
     assert!(continuation.summary.contains("revocable=true"));
+}
+
+#[tokio::test]
+async fn commit_endpoint_persists_retrievable_structured_active_commitment() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let request = CommitRequest {
+        speaker: "agent".to_string(),
+        statement: "I will send the draft tomorrow".to_string(),
+        scope: Some("current_project".to_string()),
+        deadline: Some("2026-05-02".to_string()),
+        revocable: true,
+    };
+
+    let commit_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/commit", &request))
+        .await
+        .unwrap();
+    let commit_envelope: ApiEnvelope<StoredContinuation> = read_json(commit_response).await;
+    let continuation = commit_envelope.data.unwrap();
+
+    let list_response = app
+        .clone()
+        .oneshot(empty_request("GET", "/v1/commitments"))
+        .await
+        .unwrap();
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_envelope: ApiEnvelope<Vec<StoredCommitment>> = read_json(list_response).await;
+    let commitments = list_envelope.data.unwrap();
+    assert_eq!(commitments.len(), 1);
+    let commitment = &commitments[0];
+    assert!(commitment.id.starts_with("commit_"));
+    assert_eq!(commitment.continuation_id, continuation.id);
+    assert_eq!(commitment.speaker, request.speaker);
+    assert_eq!(commitment.statement, request.statement);
+    assert_eq!(commitment.scope, request.scope);
+    assert_eq!(commitment.deadline, request.deadline);
+    assert_eq!(commitment.revocable, request.revocable);
+    assert_eq!(commitment.status, ContinuationStatus::Active);
+
+    let lens_response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/lens",
+            &LensRequest {
+                query: "draft".to_string(),
+                horizon: Vec::new(),
+                perspective: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+    let lens_envelope: ApiEnvelope<LensCard> = read_json(lens_response).await;
+    let card = lens_envelope.data.unwrap();
+    assert_eq!(card.commitment_constraints, commitments);
+    assert!(card
+        .avoid
+        .iter()
+        .any(|item| item.contains("explicit commitment")));
+
+    let unrelated_response = app
+        .oneshot(json_request(
+            "POST",
+            "/v1/lens",
+            &LensRequest {
+                query: "unrelated".to_string(),
+                horizon: Vec::new(),
+                perspective: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+    let unrelated_envelope: ApiEnvelope<LensCard> = read_json(unrelated_response).await;
+    assert!(unrelated_envelope
+        .data
+        .unwrap()
+        .commitment_constraints
+        .is_empty());
 }
 
 #[tokio::test]

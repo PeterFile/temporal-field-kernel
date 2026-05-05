@@ -7,8 +7,8 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tfk_protocol::{
-    ContinuationDelta, ContinuationInput, ContinuationStatus, ContinuationType, RawEventInput,
-    StoredContinuation, TemporalDeltaInput,
+    CommitRequest, ContinuationDelta, ContinuationInput, ContinuationStatus, ContinuationType,
+    RawEventInput, StoredCommitment, StoredContinuation, TemporalDeltaInput,
 };
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -222,6 +222,128 @@ impl Store {
             .expect("inserted continuation must be readable"))
     }
 
+    pub fn create_commitment(
+        &self,
+        request: &CommitRequest,
+        continuation_id: &str,
+    ) -> Result<StoredCommitment> {
+        let id = format!("commit_{}", Uuid::new_v4().simple());
+        let now = now_rfc3339()?;
+        let status = continuation_status_to_string(ContinuationStatus::Active)?;
+
+        self.conn.execute(
+            "INSERT INTO commitments (
+                id, continuation_id, speaker, statement, scope, deadline, revocable, status, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                id,
+                continuation_id,
+                &request.speaker,
+                &request.statement,
+                &request.scope,
+                &request.deadline,
+                request.revocable,
+                status,
+                now,
+            ],
+        )?;
+
+        Ok(self
+            .get_commitment(&id)?
+            .expect("inserted commitment must be readable"))
+    }
+
+    pub fn get_commitment(&self, id: &str) -> Result<Option<StoredCommitment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, continuation_id, speaker, statement, scope, deadline, revocable, status, created_at
+             FROM commitments WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        row_to_commitment(row)?.into_stored().map(Some)
+    }
+
+    pub fn list_active_commitments(&self) -> Result<Vec<StoredCommitment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT commitments.id, commitments.continuation_id, commitments.speaker,
+                    commitments.statement, commitments.scope, commitments.deadline,
+                    commitments.revocable, commitments.status, commitments.created_at
+             FROM commitments
+             JOIN continuations ON continuations.id = commitments.continuation_id
+             WHERE commitments.status = 'active'
+               AND continuations.status = 'active'
+             ORDER BY commitments.created_at, commitments.id",
+        )?;
+        let rows = stmt.query_map([], row_to_commitment)?;
+        self.collect_commitments(rows)
+    }
+
+    pub fn search_active_commitments(&self, query: &str) -> Result<Vec<StoredCommitment>> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let pattern = like_literal_pattern(query);
+        let mut stmt = self.conn.prepare(
+            "SELECT commitments.id, commitments.continuation_id, commitments.speaker,
+                    commitments.statement, commitments.scope, commitments.deadline,
+                    commitments.revocable, commitments.status, commitments.created_at
+             FROM commitments
+             JOIN continuations ON continuations.id = commitments.continuation_id
+             WHERE commitments.status = 'active'
+               AND continuations.status = 'active'
+               AND (
+                    commitments.speaker LIKE ?1 ESCAPE '\\'
+                 OR commitments.statement LIKE ?1 ESCAPE '\\'
+                 OR commitments.scope LIKE ?1 ESCAPE '\\'
+                 OR commitments.deadline LIKE ?1 ESCAPE '\\'
+                 OR continuations.title LIKE ?1 ESCAPE '\\'
+                 OR continuations.summary LIKE ?1 ESCAPE '\\'
+               )
+             ORDER BY commitments.created_at, commitments.id
+             LIMIT 20",
+        )?;
+        let rows = stmt.query_map(params![pattern], row_to_commitment)?;
+        self.collect_commitments(rows)
+    }
+
+    pub fn active_commitments_for_continuations(
+        &self,
+        continuation_ids: &[String],
+    ) -> Result<Vec<StoredCommitment>> {
+        let mut commitments = Vec::new();
+        for continuation_id in continuation_ids {
+            let mut stmt = self.conn.prepare(
+                "SELECT commitments.id, commitments.continuation_id, commitments.speaker,
+                        commitments.statement, commitments.scope, commitments.deadline,
+                        commitments.revocable, commitments.status, commitments.created_at
+                 FROM commitments
+                 JOIN continuations ON continuations.id = commitments.continuation_id
+                 WHERE commitments.status = 'active'
+                   AND continuations.status = 'active'
+                   AND commitments.continuation_id = ?1
+                 ORDER BY commitments.created_at, commitments.id",
+            )?;
+            commitments.extend(self.collect_commitments(
+                stmt.query_map(params![continuation_id], row_to_commitment)?,
+            )?);
+        }
+        Ok(commitments)
+    }
+
+    fn collect_commitments<I>(&self, rows: I) -> Result<Vec<StoredCommitment>>
+    where
+        I: IntoIterator<Item = rusqlite::Result<CommitmentFields>>,
+    {
+        let mut commitments = Vec::new();
+        for row in rows {
+            commitments.push(row?.into_stored()?);
+        }
+        Ok(commitments)
+    }
+
     pub fn list_continuations(&self) -> Result<Vec<StoredContinuation>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, summary, continuation_type, status, parent_id, raw_event_id, created_at, updated_at
@@ -430,6 +552,48 @@ struct ContinuationFields {
     updated_at: String,
 }
 
+struct CommitmentFields {
+    id: String,
+    continuation_id: String,
+    speaker: String,
+    statement: String,
+    scope: Option<String>,
+    deadline: Option<String>,
+    revocable: bool,
+    status: String,
+    created_at: String,
+}
+
+impl CommitmentFields {
+    fn into_stored(self) -> Result<StoredCommitment> {
+        Ok(StoredCommitment {
+            id: self.id,
+            continuation_id: self.continuation_id,
+            speaker: self.speaker,
+            statement: self.statement,
+            scope: self.scope,
+            deadline: self.deadline,
+            revocable: self.revocable,
+            status: continuation_status_from_string(&self.status)?,
+            created_at: self.created_at,
+        })
+    }
+}
+
+fn row_to_commitment(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommitmentFields> {
+    Ok(CommitmentFields {
+        id: row.get(0)?,
+        continuation_id: row.get(1)?,
+        speaker: row.get(2)?,
+        statement: row.get(3)?,
+        scope: row.get(4)?,
+        deadline: row.get(5)?,
+        revocable: row.get(6)?,
+        status: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
 impl ContinuationFields {
     fn into_stored(self) -> Result<StoredContinuation> {
         Ok(StoredContinuation {
@@ -621,6 +785,17 @@ fn run_migrations(conn: &Connection) -> Result<()> {
           raw_event_id TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS commitments (
+          id TEXT PRIMARY KEY,
+          continuation_id TEXT NOT NULL REFERENCES continuations(id),
+          speaker TEXT NOT NULL,
+          statement TEXT NOT NULL,
+          scope TEXT,
+          deadline TEXT,
+          revocable INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS temporal_deltas (
           id TEXT PRIMARY KEY,

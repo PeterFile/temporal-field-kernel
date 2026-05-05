@@ -2,7 +2,7 @@ use schemars::schema_for;
 use tfk_protocol::{
     ApiEnvelope, CandidateAction, CommitRequest, ContinuationInput, ContinuationRelationEdge,
     ContinuationRelationKind, ContinuationStatus, ContinuationType, EventModality, EventSource,
-    EvidenceStatus, ForecastRequest, LensCard, RawEventInput, StoredContinuation,
+    EvidenceStatus, ForecastRequest, LensCard, RawEventInput, StoredCommitment, StoredContinuation,
     TemporalDeltaInput,
 };
 
@@ -99,9 +99,49 @@ fn lens_card_accepts_legacy_wire_shape_without_time_field_details() {
 
     assert_eq!(card.stance, "grounded_recall");
     assert!(card.active_continuations.is_empty());
+    assert!(card.commitment_constraints.is_empty());
     assert!(card.boundaries.is_empty());
     assert!(card.preferred_action.is_none());
     assert!(card.temporal_debt.is_none());
+}
+
+#[test]
+fn commitment_wire_types_roundtrip_and_lens_field_is_optional() {
+    let commitment = StoredCommitment {
+        id: "commit_1".to_string(),
+        continuation_id: "cont_1".to_string(),
+        speaker: "agent".to_string(),
+        statement: "I will send the draft tomorrow".to_string(),
+        scope: Some("current_project".to_string()),
+        deadline: Some("2026-05-02".to_string()),
+        revocable: true,
+        status: ContinuationStatus::Active,
+        created_at: "2026-05-02T00:00:00Z".to_string(),
+    };
+    let json = serde_json::to_value(&commitment).unwrap();
+
+    assert_eq!(json["id"], "commit_1");
+    assert_eq!(json["continuation_id"], "cont_1");
+    assert_eq!(json["status"], "active");
+    assert_eq!(
+        serde_json::from_value::<StoredCommitment>(json).unwrap(),
+        commitment
+    );
+
+    let card: LensCard = serde_json::from_value(serde_json::json!({
+        "stance": "act",
+        "why_now": "active commitment constrains the next action",
+        "active_continuations": [],
+        "commitment_constraints": [commitment],
+        "avoid": ["do not violate explicit commitments"],
+        "open_questions": []
+    }))
+    .unwrap();
+
+    assert_eq!(card.commitment_constraints.len(), 1);
+    assert_eq!(card.commitment_constraints[0].continuation_id, "cont_1");
+    let _commitment_schema = schema_for!(StoredCommitment);
+    let _lens_schema = schema_for!(LensCard);
 }
 
 #[test]

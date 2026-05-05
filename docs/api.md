@@ -11,6 +11,7 @@ POST /v1/lens
 POST /v1/forecast
 POST /v1/preflight
 POST /v1/commit
+GET  /v1/commitments
 POST /v1/assimilate
 GET  /healthz
 ```
@@ -107,4 +108,12 @@ Accepts `LensRequest`:
 }
 ```
 
-Current behavior is intentionally minimal: search continuation title/summary first and return a temporal `LensCard` grounded by matching `continuation` provenance. If no continuation matches, it falls back to raw events with `raw_event` provenance. This is a lens over living pasts, not a generic memory recall API.
+Current behavior is intentionally minimal: search continuation title/summary and active commitments first, then return a temporal `LensCard` grounded by matching `continuation` provenance. Matching active commitments are surfaced as `commitment_constraints`. If no continuation or active commitment matches, it falls back to raw events with `raw_event` provenance. This is a lens over living pasts, not a generic memory recall API.
+
+### POST /v1/commit
+
+Accepts `CommitRequest`, preserves the existing behavior of returning the created obligation `StoredContinuation`, and also persists a linked structured commitment row.
+
+### GET /v1/commitments
+
+Returns `ApiEnvelope<Vec<StoredCommitment>>` for active commitments whose linked continuation is still active.

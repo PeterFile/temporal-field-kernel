@@ -181,6 +181,8 @@ pub struct LensCard {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_continuations: Vec<LensActiveContinuation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commitment_constraints: Vec<StoredCommitment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boundaries: Vec<LensBoundary>,
     pub avoid: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -286,6 +288,21 @@ pub struct CommitRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
     pub revocable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StoredCommitment {
+    pub id: String,
+    pub continuation_id: String,
+    pub speaker: String,
+    pub statement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<String>,
+    pub revocable: bool,
+    pub status: ContinuationStatus,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
