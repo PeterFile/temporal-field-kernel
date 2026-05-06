@@ -26,6 +26,7 @@ crates/
 ```bash
 cargo run -q -p tfk-daemon -- serve --uds /tmp/tfk.sock --data-dir /tmp/tfk-data
 cargo run -q -p tfk-daemon -- serve --uds /tmp/tfk.sock --data-dir /tmp/tfk-data --forecast-advisory-json fixtures/temporalbench/forecast_advisory/basic_forecast.json
+cargo run -q -p tfk-daemon -- serve --uds /tmp/tfk.sock --data-dir /tmp/tfk-data --forecast-sidecar-command python3 --forecast-sidecar-arg python/tfk_predictor/tfk_predictor/server.py
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock observe --session s1 --adapter cli "不要做项目状态机"
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock continuation create --summary "继续跟踪这个判断" "项目状态机不是目标"
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock continuation list
@@ -37,7 +38,7 @@ cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock assimilate --json-file /tmp/delta
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock lens "项目状态机"
 ```
 
-`--forecast-advisory-json` is opt-in. It loads local static advisory forecast signals from either a bare `AdvisoryForecastSignal[]` JSON file or an object containing `advisory_signals`. When omitted, forecast behavior is unchanged; the deterministic scorer still runs in all cases.
+`--forecast-advisory-json` is opt-in. It loads local static advisory forecast signals from either a bare `AdvisoryForecastSignal[]` JSON file or an object containing `advisory_signals`. `--forecast-sidecar-command` is also opt-in and runs a local stdio sidecar command with repeated `--forecast-sidecar-arg` values; the bundled Python sidecar emits `advisory_signals` and degrades to a deterministic heuristic when `river` is not installed. When both flags are omitted, forecast behavior is unchanged; the deterministic scorer still runs in all cases.
 
 The daemon keeps the raw event archive and rebuildable projection in:
 
