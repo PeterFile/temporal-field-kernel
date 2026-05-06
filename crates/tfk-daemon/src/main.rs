@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -36,6 +37,20 @@ enum Command {
         /// Load advisory-only static forecast signals from local JSON.
         #[arg(long)]
         forecast_advisory_json: Option<PathBuf>,
+        /// Run an opt-in stdio forecast sidecar command that emits advisory_signals JSON.
+        #[arg(
+            long,
+            value_name = "PROGRAM",
+            conflicts_with = "forecast_advisory_json"
+        )]
+        forecast_sidecar_command: Option<PathBuf>,
+        /// Argument passed to --forecast-sidecar-command. Repeat for multiple args.
+        #[arg(
+            long = "forecast-sidecar-arg",
+            value_name = "ARG",
+            requires = "forecast_sidecar_command"
+        )]
+        forecast_sidecar_args: Vec<OsString>,
     },
 }
 
@@ -57,10 +72,17 @@ async fn main() -> anyhow::Result<()> {
             http,
             data_dir,
             forecast_advisory_json,
+            forecast_sidecar_command,
+            forecast_sidecar_args,
         } => {
             let data_dir = data_dir.unwrap_or_else(default_data_dir);
             let store = open_store(&data_dir)?;
-            let state = api_state_for_store(store, forecast_advisory_json.as_deref())?;
+            let forecast_sidecar = forecast_sidecar_command.map(|command| ForecastSidecarConfig {
+                command,
+                args: forecast_sidecar_args,
+            });
+            let state =
+                api_state_for_store(store, forecast_advisory_json.as_deref(), forecast_sidecar)?;
             if let Some(http) = http {
                 serve_http(http, state).await?;
             } else {
@@ -75,15 +97,26 @@ async fn main() -> anyhow::Result<()> {
 fn api_state_for_store(
     store: Store,
     forecast_advisory_json: Option<&Path>,
+    forecast_sidecar: Option<ForecastSidecarConfig>,
 ) -> anyhow::Result<tfk_api::ApiState> {
     let state = tfk_api::ApiState::new(store);
-    let Some(path) = forecast_advisory_json else {
-        return Ok(state);
-    };
-    let client = tfk_model_client::StaticForecastClient::from_json_file(path)
-        .map_err(anyhow::Error::from)
-        .with_context(|| format!("failed to load forecast advisory JSON {}", path.display()))?;
-    Ok(state.with_forecast_client(client))
+    if let Some(path) = forecast_advisory_json {
+        let client = tfk_model_client::StaticForecastClient::from_json_file(path)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("failed to load forecast advisory JSON {}", path.display()))?;
+        return Ok(state.with_forecast_client(client));
+    }
+    if let Some(sidecar) = forecast_sidecar {
+        let client = tfk_model_client::StdioForecastClient::new(sidecar.command, sidecar.args);
+        return Ok(state.with_forecast_client(client));
+    }
+    Ok(state)
+}
+
+#[derive(Debug, Clone)]
+struct ForecastSidecarConfig {
+    command: PathBuf,
+    args: Vec<OsString>,
 }
 
 async fn serve_http(http: String, state: tfk_api::ApiState) -> anyhow::Result<()> {
@@ -355,6 +388,66 @@ mod tests {
         };
 
         assert_eq!(forecast_advisory_json, Some(PathBuf::from("forecast.json")));
+    }
+
+    #[test]
+    fn serve_parses_forecast_sidecar_command_and_args() {
+        let cli = Cli::parse_from([
+            "tfkd",
+            "serve",
+            "--forecast-sidecar-command",
+            "python3",
+            "--forecast-sidecar-arg",
+            "python/tfk_predictor/tfk_predictor/server.py",
+        ]);
+
+        let Command::Serve {
+            forecast_sidecar_command,
+            forecast_sidecar_args,
+            ..
+        } = cli.command
+        else {
+            panic!("expected serve command");
+        };
+
+        assert_eq!(forecast_sidecar_command, Some(PathBuf::from("python3")));
+        assert_eq!(
+            forecast_sidecar_args,
+            vec![OsString::from(
+                "python/tfk_predictor/tfk_predictor/server.py"
+            )]
+        );
+    }
+
+    #[test]
+    fn serve_rejects_static_json_and_sidecar_together() {
+        let error = Cli::try_parse_from([
+            "tfkd",
+            "serve",
+            "--forecast-advisory-json",
+            "forecast.json",
+            "--forecast-sidecar-command",
+            "python3",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn serve_rejects_sidecar_arg_without_command() {
+        let error = Cli::try_parse_from([
+            "tfkd",
+            "serve",
+            "--forecast-sidecar-arg",
+            "python/tfk_predictor/tfk_predictor/server.py",
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     fn bind_test_socket_or_skip(path: &Path) -> Option<StdUnixListener> {
