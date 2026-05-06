@@ -1,11 +1,17 @@
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use tfk_eval::{
     load_fixture_events, replay_action_loop_fixture, replay_fixture, replay_forecast_fixture,
 };
 use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
-use tfk_protocol::{EventSource, EvidenceStatus};
+use tfk_protocol::{AdvisoryForecastSignal, EventSource, EvidenceStatus, ForecastRequest};
+use tfk_store::Store;
+use tfk_vector::{
+    VectorDocument, VectorDocumentKind, VectorError, VectorHit, VectorIndex, VectorIndexOutcome,
+    VectorIndexStatus,
+};
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -97,6 +103,88 @@ fn forecast_fixture_advisory_signals_roundtrip_through_static_model_client() {
 }
 
 #[test]
+fn vector_advisory_fixture_persists_with_noop_vector_fallback() {
+    let (request, fixture_signals) = forecast_fixture_request_and_signals();
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("store");
+    let store = Store::open(data_dir.join("tfk.db"), data_dir.join("archive")).unwrap();
+    assert_eq!(
+        store.vector_index_status(),
+        VectorIndexStatus::unavailable("noop", "vector backend is not configured")
+    );
+
+    let client = StaticForecastClient::new(fixture_signals);
+    let signals = client.forecast(&request).unwrap();
+    let stored = store.record_advisory_forecast_signals(&signals).unwrap();
+
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].name, "forming_future_risk");
+    assert_eq!(stored[0].model, "fixture-static");
+    assert_eq!(stored[0].action_name.as_deref(), Some("verify then ship"));
+    assert_eq!(store.list_advisory_forecast_signals().unwrap(), stored);
+}
+
+#[test]
+fn vector_advisory_fixture_indexes_signal_when_vector_index_is_injected() {
+    let (request, fixture_signals) = forecast_fixture_request_and_signals();
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("store");
+    let index = Arc::new(RecordingVectorIndex::default());
+    let store = Store::open_with_vector_index(
+        data_dir.join("tfk.db"),
+        data_dir.join("archive"),
+        index.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        store.vector_index_status(),
+        VectorIndexStatus::available("recording")
+    );
+
+    let client = StaticForecastClient::new(fixture_signals);
+    let signals = client.forecast(&request).unwrap();
+    let stored = store.record_advisory_forecast_signals(&signals).unwrap();
+
+    let documents = index.documents.lock().unwrap();
+    assert_eq!(documents.len(), stored.len());
+    assert_eq!(documents[0].source_id, stored[0].id);
+    assert_eq!(
+        documents[0].kind,
+        VectorDocumentKind::AdvisoryForecastSignal
+    );
+    assert!(documents[0].embedding.is_none());
+    for needle in [
+        "forming_future_risk",
+        "fixture-static",
+        "verify then ship",
+        "unresolved risk",
+    ] {
+        assert!(documents[0].text.contains(needle), "missing {needle}");
+    }
+}
+
+#[test]
+fn vector_advisory_fixture_persists_when_vector_index_fails() {
+    let (request, fixture_signals) = forecast_fixture_request_and_signals();
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("store");
+    let store = Store::open_with_vector_index(
+        data_dir.join("tfk.db"),
+        data_dir.join("archive"),
+        Arc::new(FailingVectorIndex),
+    )
+    .unwrap();
+
+    let client = StaticForecastClient::new(fixture_signals);
+    let signals = client.forecast(&request).unwrap();
+    let stored = store.record_advisory_forecast_signals(&signals).unwrap();
+
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].name, "forming_future_risk");
+    assert_eq!(store.list_advisory_forecast_signals().unwrap(), stored);
+}
+
+#[test]
 fn forecast_replay_cli_prints_structured_json_summary() {
     let output = Command::new(env!("CARGO_BIN_EXE_tfk-eval"))
         .args([
@@ -165,4 +253,57 @@ fn action_loop_replay_cli_prints_structured_json_summary() {
     assert_eq!(value["commitment_constraint_count_after_assimilate"], 0);
     assert_eq!(value["active_pressure_count_after_assimilate"], 0);
     assert_eq!(value["ok"], true);
+}
+
+fn forecast_fixture_request_and_signals() -> (ForecastRequest, Vec<AdvisoryForecastSignal>) {
+    let value: serde_json::Value =
+        serde_json::from_reader(std::fs::File::open(forecast_fixture_path()).unwrap()).unwrap();
+    let request = serde_json::from_value(value["request"].clone()).unwrap();
+    let signals = serde_json::from_value(value["advisory_signals"].clone()).unwrap();
+    (request, signals)
+}
+
+#[derive(Debug, Default)]
+struct RecordingVectorIndex {
+    documents: Mutex<Vec<VectorDocument>>,
+}
+
+#[derive(Debug)]
+struct FailingVectorIndex;
+
+impl VectorIndex for RecordingVectorIndex {
+    fn status(&self) -> VectorIndexStatus {
+        VectorIndexStatus::available("recording")
+    }
+
+    fn upsert(&self, document: &VectorDocument) -> tfk_vector::Result<VectorIndexOutcome> {
+        self.documents.lock().unwrap().push(document.clone());
+        Ok(VectorIndexOutcome::Indexed)
+    }
+
+    fn search(
+        &self,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> tfk_vector::Result<Vec<VectorHit>> {
+        Ok(Vec::new())
+    }
+}
+
+impl VectorIndex for FailingVectorIndex {
+    fn status(&self) -> VectorIndexStatus {
+        VectorIndexStatus::available("failing")
+    }
+
+    fn upsert(&self, _document: &VectorDocument) -> tfk_vector::Result<VectorIndexOutcome> {
+        Err(VectorError::Backend("boom".to_string()))
+    }
+
+    fn search(
+        &self,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> tfk_vector::Result<Vec<VectorHit>> {
+        Ok(Vec::new())
+    }
 }

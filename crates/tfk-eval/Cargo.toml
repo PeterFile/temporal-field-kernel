@@ -19,3 +19,6 @@ tfk-core = { path = "../tfk-core" }
 tfk-model-client = { path = "../tfk-model-client" }
 tfk-protocol = { path = "../tfk-protocol" }
 tfk-store = { path = "../tfk-store" }
+
+[dev-dependencies]
+tfk-vector = { path = "../tfk-vector" }
