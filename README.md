@@ -24,6 +24,7 @@ crates/
 
 ```bash
 cargo run -q -p tfk-daemon -- serve --uds /tmp/tfk.sock --data-dir /tmp/tfk-data
+cargo run -q -p tfk-daemon -- serve --uds /tmp/tfk.sock --data-dir /tmp/tfk-data --forecast-advisory-json fixtures/temporalbench/forecast_advisory/basic_forecast.json
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock observe --session s1 --adapter cli "不要做项目状态机"
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock continuation create --summary "继续跟踪这个判断" "项目状态机不是目标"
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock continuation list
@@ -34,6 +35,8 @@ cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock forecast --json-file fixtures/tem
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock assimilate --json-file /tmp/delta.json
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock lens "项目状态机"
 ```
+
+`--forecast-advisory-json` is opt-in. It loads local static advisory forecast signals from either a bare `AdvisoryForecastSignal[]` JSON file or an object containing `advisory_signals`. When omitted, forecast behavior is unchanged; the deterministic scorer still runs in all cases.
 
 The daemon keeps the raw event archive and rebuildable projection in:
 
