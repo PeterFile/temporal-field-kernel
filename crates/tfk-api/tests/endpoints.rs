@@ -412,6 +412,88 @@ async fn lens_projects_active_continuation_as_time_field_action_constraint() {
 }
 
 #[tokio::test]
+async fn lens_promotes_raw_event_hit_to_linked_active_continuation() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let raw = RawEventInput::new_text(
+        "s1",
+        "cli",
+        EventSource::User,
+        "linked-only-query appears only in raw content",
+    );
+    let observe_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/observe", &raw))
+        .await
+        .unwrap();
+    let observe_envelope: ApiEnvelope<StoredRawEvent> = read_json(observe_response).await;
+    let stored_event = observe_envelope.data.unwrap();
+    let input = ContinuationInput {
+        title: "continuation title without token".to_string(),
+        summary: "summary without the searched token".to_string(),
+        continuation_type: ContinuationType::Obligation,
+        status: ContinuationStatus::Active,
+        parent_id: None,
+        raw_event_id: Some(stored_event.id.clone()),
+    };
+    let create_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/continuations", &input))
+        .await
+        .unwrap();
+    let created: ApiEnvelope<StoredContinuation> = read_json(create_response).await;
+    let created = created.data.unwrap();
+    let lens = LensRequest {
+        query: "linked-only-query".to_string(),
+        horizon: Vec::new(),
+        perspective: Vec::new(),
+    };
+
+    let active_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/lens", &lens))
+        .await
+        .unwrap();
+
+    assert_eq!(active_response.status(), StatusCode::OK);
+    let active_envelope: ApiEnvelope<LensCard> = read_json(active_response).await;
+    assert_eq!(active_envelope.provenance[0].kind, "continuation");
+    assert_eq!(active_envelope.provenance[0].id, created.id);
+    let active_card = active_envelope.data.unwrap();
+    assert_eq!(active_card.stance, "act");
+    assert_eq!(active_card.active_continuations.len(), 1);
+    assert_eq!(active_card.active_continuations[0].id, created.id);
+
+    let delta = TemporalDeltaInput {
+        action_id: "close-linked-continuation".to_string(),
+        changes: vec![ContinuationStatusDelta {
+            continuation_id: created.id.clone(),
+            delta: ContinuationDelta::Close,
+        }],
+        claims_made: Vec::new(),
+        evidence: Vec::new(),
+    };
+    app.clone()
+        .oneshot(json_request("POST", "/v1/assimilate", &delta))
+        .await
+        .unwrap();
+
+    let closed_response = app
+        .oneshot(json_request("POST", "/v1/lens", &lens))
+        .await
+        .unwrap();
+
+    assert_eq!(closed_response.status(), StatusCode::OK);
+    let closed_envelope: ApiEnvelope<LensCard> = read_json(closed_response).await;
+    assert_eq!(closed_envelope.provenance[0].kind, "raw_event");
+    assert_eq!(closed_envelope.provenance[0].id, stored_event.id);
+    let closed_card = closed_envelope.data.unwrap();
+    assert_eq!(closed_card.stance, "grounded_recall");
+    assert!(closed_card.active_continuations.is_empty());
+}
+
+#[tokio::test]
 async fn commit_endpoint_creates_active_obligation_continuation() {
     let tmp = tempdir().unwrap();
     let store = open_test_store(tmp.path());

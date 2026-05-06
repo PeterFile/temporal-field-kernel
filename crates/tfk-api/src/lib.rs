@@ -283,7 +283,7 @@ async fn lens_handler(
     State(state): State<ApiState>,
     Json(request): Json<LensRequest>,
 ) -> Result<Json<ApiEnvelope<LensCard>>, ApiError> {
-    let (continuations, events, commitment_constraints) = {
+    let (continuations, events, commitment_constraints, promoted_raw_event_ids) = {
         let store = state
             .store
             .lock()
@@ -330,21 +330,45 @@ async fn lens_handler(
             }
         }
         if !continuations.is_empty() {
-            (continuations, Vec::new(), commitment_constraints)
+            (
+                continuations,
+                Vec::new(),
+                commitment_constraints,
+                Vec::new(),
+            )
         } else {
             let hits = store
                 .search_raw_events(&request.query)
                 .map_err(|error| internal_error(error.to_string()))?;
-            let mut events = Vec::new();
-            for id in hits {
-                if let Some(event) = store
-                    .get_raw_event(&id)
-                    .map_err(|error| internal_error(error.to_string()))?
-                {
-                    events.push(event);
+            let linked_continuations = store
+                .active_continuations_for_raw_event_ids(&hits)
+                .map_err(|error| internal_error(error.to_string()))?;
+            if linked_continuations.is_empty() {
+                let mut events = Vec::new();
+                for id in hits {
+                    if let Some(event) = store
+                        .get_raw_event(&id)
+                        .map_err(|error| internal_error(error.to_string()))?
+                    {
+                        events.push(event);
+                    }
                 }
+                (continuations, events, Vec::new(), Vec::new())
+            } else {
+                let continuation_ids: Vec<_> = linked_continuations
+                    .iter()
+                    .map(|continuation| continuation.id.clone())
+                    .collect();
+                let commitment_constraints = store
+                    .active_commitments_for_continuations(&continuation_ids)
+                    .map_err(|error| internal_error(error.to_string()))?;
+                (
+                    linked_continuations,
+                    Vec::new(),
+                    commitment_constraints,
+                    hits,
+                )
             }
-            (continuations, events, Vec::new())
         }
     };
 
@@ -356,7 +380,19 @@ async fn lens_handler(
             .map(|continuation| TimeFieldContinuation {
                 id: continuation.id.clone(),
                 title: continuation.title.clone(),
-                summary: continuation.summary.clone(),
+                summary: if continuation
+                    .raw_event_id
+                    .as_ref()
+                    .is_some_and(|raw_event_id| promoted_raw_event_ids.contains(raw_event_id))
+                {
+                    // The raw-event search already proved the query matches evidence linked to
+                    // this continuation. Seed the in-memory core projection with that query so
+                    // TimeFieldLensEngine can score the linked continuation without mutating the
+                    // stored continuation or widening protocol/schema.
+                    format!("{} {}", continuation.summary, request.query)
+                } else {
+                    continuation.summary.clone()
+                },
                 continuation_type: continuation.continuation_type,
                 status: continuation.status,
             })
