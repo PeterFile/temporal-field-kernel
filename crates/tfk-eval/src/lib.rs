@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -7,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use tfk_core::{ForecastScorer, PreflightScorer, TimeFieldContinuation, TimeFieldLensEngine};
 use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{
-    AdvisoryForecastSignal, CommitRequest, ContinuationDelta, ContinuationStatus,
-    ContinuationStatusDelta, ContinuationType, EventModality, EventSource, EvidenceStatus,
-    ForecastRequest, LensCard, LensRequest, PreflightSignals, RawEventInput, TemporalDeltaInput,
+    AdvisoryForecastSignal, CommitRequest, ContinuationDelta, ContinuationRelationEdge,
+    ContinuationRelationKind, ContinuationStatus, ContinuationStatusDelta, ContinuationType,
+    EventModality, EventSource, EvidenceStatus, ForecastRequest, LensCard, LensRequest,
+    PreflightSignals, RawEventInput, TemporalDeltaInput,
 };
 use tfk_store::Store;
 
@@ -56,6 +58,19 @@ pub struct LensLinkedRawEventReplaySummary {
     pub assimilated_status: String,
     pub after_stance: String,
     pub after_active_continuation_count: usize,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelationBoundaryReplaySummary {
+    pub fixture_path: String,
+    pub before_stance: String,
+    pub before_boundary_kinds: Vec<String>,
+    pub before_active_continuation_count: usize,
+    pub assimilated_status: String,
+    pub after_boundary_kinds: Vec<String>,
+    pub after_active_continuation_count: usize,
+    pub after_stance: String,
     pub ok: bool,
 }
 
@@ -329,6 +344,96 @@ pub fn replay_lens_linked_raw_event_fixture(
     })
 }
 
+pub fn replay_relation_boundary_fixture(
+    path: &Path,
+) -> anyhow::Result<RelationBoundaryReplaySummary> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
+    let fixture: RelationBoundaryFixture = serde_json::from_reader(file)
+        .with_context(|| format!("invalid fixture {}", path.display()))?;
+    let tmp = tempfile::tempdir().context("failed to create relation-boundary temp directory")?;
+    let data_dir = tmp.path().join("store");
+    let mut store = Store::open(data_dir.join("tfk.db"), data_dir.join("archive"))
+        .context("failed to open relation-boundary store")?;
+
+    let mut continuation_ids = HashMap::new();
+    for continuation in fixture.continuations {
+        let stored = store
+            .create_continuation(&continuation.input)
+            .with_context(|| format!("failed to create continuation {}", continuation.label))?;
+        continuation_ids.insert(continuation.label, stored.id);
+    }
+
+    let from_id = continuation_ids
+        .get(&fixture.relation.from)
+        .with_context(|| format!("unknown relation from label {}", fixture.relation.from))?
+        .clone();
+    let to_id = continuation_ids
+        .get(&fixture.relation.to)
+        .with_context(|| format!("unknown relation to label {}", fixture.relation.to))?
+        .clone();
+    store
+        .create_continuation_relation(&ContinuationRelationEdge {
+            from_id,
+            to_id,
+            kind: fixture.relation.kind,
+            reason: fixture.relation.reason,
+        })
+        .context("failed to create continuation relation")?;
+
+    let before = lens_from_store(&store, &fixture.lens)
+        .context("failed to run pre-assimilate relation-boundary lens")?;
+    let target_id = continuation_ids
+        .get(&fixture.assimilation.target)
+        .with_context(|| {
+            format!(
+                "unknown assimilation target label {}",
+                fixture.assimilation.target
+            )
+        })?
+        .clone();
+    store
+        .assimilate_delta(&TemporalDeltaInput {
+            action_id: fixture.assimilation.action_id,
+            changes: vec![ContinuationStatusDelta {
+                continuation_id: target_id.clone(),
+                delta: fixture.assimilation.delta,
+            }],
+            claims_made: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .context("failed to assimilate relation-boundary delta")?;
+    let assimilated_status = store
+        .get_continuation(&target_id)
+        .context("failed to read assimilated relation-boundary continuation")?
+        .map(|stored| status_name(stored.status).to_string())
+        .unwrap_or_default();
+    let after = lens_from_store(&store, &fixture.lens)
+        .context("failed to run post-assimilate relation-boundary lens")?;
+
+    let before_boundary_kinds = boundary_kinds(&before);
+    let after_boundary_kinds = boundary_kinds(&after);
+    let ok = before.stance == fixture.expected.before_stance
+        && before_boundary_kinds == fixture.expected.before_boundary_kinds
+        && before.active_continuations.len() == fixture.expected.before_active_continuation_count
+        && assimilated_status == fixture.expected.assimilated_status
+        && after_boundary_kinds == fixture.expected.after_boundary_kinds
+        && after.active_continuations.len() == fixture.expected.after_active_continuation_count
+        && after.stance == fixture.expected.after_stance;
+
+    Ok(RelationBoundaryReplaySummary {
+        fixture_path: path.to_string_lossy().to_string(),
+        before_stance: before.stance,
+        before_boundary_kinds,
+        before_active_continuation_count: before.active_continuations.len(),
+        assimilated_status,
+        after_boundary_kinds,
+        after_active_continuation_count: after.active_continuations.len(),
+        after_stance: after.stance,
+        ok,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct ForecastFixture {
     request: ForecastRequest,
@@ -389,6 +494,47 @@ struct LensLinkedRawEventExpected {
     assimilated_status: String,
     after_stance: String,
     after_active_continuation_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelationBoundaryFixture {
+    continuations: Vec<RelationBoundaryContinuation>,
+    relation: RelationBoundaryRelation,
+    lens: LensRequest,
+    assimilation: RelationBoundaryAssimilation,
+    expected: RelationBoundaryExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelationBoundaryContinuation {
+    label: String,
+    input: tfk_protocol::ContinuationInput,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelationBoundaryRelation {
+    from: String,
+    to: String,
+    kind: ContinuationRelationKind,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelationBoundaryAssimilation {
+    target: String,
+    action_id: String,
+    delta: ContinuationDelta,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelationBoundaryExpected {
+    before_stance: String,
+    before_boundary_kinds: Vec<String>,
+    before_active_continuation_count: usize,
+    assimilated_status: String,
+    after_boundary_kinds: Vec<String>,
+    after_active_continuation_count: usize,
+    after_stance: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -496,6 +642,13 @@ fn lens_from_store(store: &Store, request: &LensRequest) -> anyhow::Result<LensC
         }
     }
 
+    let selected_continuation_ids: Vec<_> = continuations
+        .iter()
+        .map(|continuation| continuation.id.clone())
+        .collect();
+    let relations = store
+        .active_continuation_relations_for_continuation_ids(&selected_continuation_ids)
+        .context("failed to load active continuation relations")?;
     let time_field_continuations: Vec<_> = continuations
         .into_iter()
         .map(|continuation| TimeFieldContinuation {
@@ -517,10 +670,21 @@ fn lens_from_store(store: &Store, request: &LensRequest) -> anyhow::Result<LensC
             status: continuation.status,
         })
         .collect();
-    let mut card =
-        TimeFieldLensEngine.generate(request, &time_field_continuations, raw_event_count);
+    let mut card = TimeFieldLensEngine.generate_with_relations(
+        request,
+        &time_field_continuations,
+        &relations,
+        raw_event_count,
+    );
     card.commitment_constraints = commitment_constraints;
     Ok(card)
+}
+
+fn boundary_kinds(card: &LensCard) -> Vec<String> {
+    card.boundaries
+        .iter()
+        .map(|boundary| boundary.kind.clone())
+        .collect()
 }
 
 fn continuation_input_from_commitment(

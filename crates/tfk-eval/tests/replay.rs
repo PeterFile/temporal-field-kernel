@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use tfk_eval::{
     load_fixture_events, replay_action_loop_fixture, replay_fixture, replay_forecast_fixture,
-    replay_lens_linked_raw_event_fixture,
+    replay_lens_linked_raw_event_fixture, replay_relation_boundary_fixture,
 };
 use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{AdvisoryForecastSignal, EventSource, EvidenceStatus, ForecastRequest};
@@ -32,6 +32,11 @@ fn action_loop_fixture_path() -> PathBuf {
 fn lens_linked_raw_event_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/temporalbench/lens_linked_raw_event/basic.json")
+}
+
+fn relation_boundary_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/relation_boundary/basic.json")
 }
 
 #[test]
@@ -307,6 +312,48 @@ fn lens_linked_raw_event_cli_prints_structured_json_summary() {
     assert_eq!(value["assimilated_status"], "closed");
     assert_eq!(value["after_stance"], "grounded_recall");
     assert_eq!(value["after_active_continuation_count"], 0);
+    assert_eq!(value["ok"], true);
+}
+
+#[test]
+fn relation_boundary_replay_emits_relation_block_then_clears_after_close() {
+    let summary = replay_relation_boundary_fixture(&relation_boundary_fixture_path()).unwrap();
+
+    assert_eq!(summary.before_stance, "verify");
+    assert_eq!(summary.before_boundary_kinds, vec!["relation_block"]);
+    assert_eq!(summary.before_active_continuation_count, 2);
+    assert_eq!(summary.assimilated_status, "closed");
+    assert_eq!(summary.after_boundary_kinds, Vec::<String>::new());
+    assert_eq!(summary.after_active_continuation_count, 1);
+    assert_eq!(summary.after_stance, "act");
+    assert!(summary.ok);
+}
+
+#[test]
+fn relation_boundary_cli_prints_structured_json_summary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tfk-eval"))
+        .args([
+            "relation-boundary",
+            "--fixture",
+            relation_boundary_fixture_path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["before_stance"], "verify");
+    assert_eq!(value["before_boundary_kinds"][0], "relation_block");
+    assert_eq!(value["before_active_continuation_count"], 2);
+    assert_eq!(value["assimilated_status"], "closed");
+    assert_eq!(value["after_boundary_kinds"].as_array().unwrap().len(), 0);
+    assert_eq!(value["after_active_continuation_count"], 1);
+    assert_eq!(value["after_stance"], "act");
     assert_eq!(value["ok"], true);
 }
 
