@@ -4,8 +4,9 @@ use anyhow::bail;
 use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
 use tfk_protocol::{
-    CommitRequest, ContinuationInput, ContinuationStatus, ContinuationType, EventSource,
-    ForecastRequest, LensRequest, PreflightSignals, RawEventInput, TemporalDeltaInput,
+    CommitRequest, ContinuationInput, ContinuationRelationEdge, ContinuationRelationKind,
+    ContinuationStatus, ContinuationType, EventSource, ForecastRequest, LensRequest,
+    PreflightSignals, RawEventInput, TemporalDeltaInput,
 };
 
 #[derive(Debug, Parser)]
@@ -47,6 +48,11 @@ enum Command {
     Continuation {
         #[command(subcommand)]
         command: ContinuationCommand,
+    },
+    /// Create or list continuation relations through the local tfkd daemon.
+    Relation {
+        #[command(subcommand)]
+        command: RelationCommand,
     },
     /// List active commitments through the local tfkd daemon.
     Commitment {
@@ -92,6 +98,23 @@ enum ContinuationCommand {
     List,
     /// Get one stored continuation.
     Get { id: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum RelationCommand {
+    /// Create a persisted continuation relation.
+    Create {
+        #[arg(long)]
+        from_id: String,
+        #[arg(long)]
+        to_id: String,
+        #[arg(long, value_parser = parse_relation_kind)]
+        kind: ContinuationRelationKind,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// List persisted continuation relations.
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -203,6 +226,26 @@ async fn main() -> anyhow::Result<()> {
                 print_json(&response)?;
             }
         },
+        Command::Relation { command } => match command {
+            RelationCommand::Create {
+                from_id,
+                to_id,
+                kind,
+                reason,
+            } => {
+                let body = relation_create_request_body(from_id, to_id, kind, reason)?;
+                let response =
+                    tfk_cli::request_json_over_uds(&socket_path, relation_endpoint(), &body)
+                        .await?;
+                print_json(&response)?;
+            }
+            RelationCommand::List => {
+                let response =
+                    tfk_cli::request_over_uds(&socket_path, "GET", relation_endpoint(), b"")
+                        .await?;
+                print_json(&response)?;
+            }
+        },
         Command::Commitment { command } => match command {
             CommitmentCommand::List => {
                 let response =
@@ -296,6 +339,31 @@ fn commit_request_body(
     })?)
 }
 
+fn relation_create_request_body(
+    from_id: String,
+    to_id: String,
+    kind: ContinuationRelationKind,
+    reason: Option<String>,
+) -> anyhow::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&ContinuationRelationEdge {
+        from_id,
+        to_id,
+        kind,
+        reason,
+    })?)
+}
+
+fn parse_relation_kind(value: &str) -> Result<ContinuationRelationKind, String> {
+    match value {
+        "blocks" => Ok(ContinuationRelationKind::Blocks),
+        "conflicts" => Ok(ContinuationRelationKind::Conflicts),
+        "supports" => Ok(ContinuationRelationKind::Supports),
+        "depends_on" => Ok(ContinuationRelationKind::DependsOn),
+        "subsumes" => Ok(ContinuationRelationKind::Subsumes),
+        _ => Err("expected one of: blocks, conflicts, supports, depends_on, subsumes".to_string()),
+    }
+}
+
 fn json_file_body<T>(path: &Path) -> anyhow::Result<Vec<u8>>
 where
     T: DeserializeOwned + serde::Serialize,
@@ -316,6 +384,10 @@ where
 
 fn commit_create_endpoint() -> &'static str {
     "/v1/commit"
+}
+
+fn relation_endpoint() -> &'static str {
+    "/v1/continuation-relations"
 }
 
 fn forecast_endpoint() -> &'static str {
@@ -455,6 +527,88 @@ mod tests {
             } => assert_eq!(id, "cont_abc123"),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_relation_create_command() {
+        let cli = Cli::parse_from([
+            "tfk",
+            "relation",
+            "create",
+            "--from-id",
+            "cont_a",
+            "--to-id",
+            "cont_b",
+            "--kind",
+            "depends_on",
+            "--reason",
+            "a needs b",
+        ]);
+
+        match cli.command {
+            Command::Relation {
+                command:
+                    RelationCommand::Create {
+                        from_id,
+                        to_id,
+                        kind,
+                        reason,
+                    },
+            } => {
+                assert_eq!(from_id, "cont_a");
+                assert_eq!(to_id, "cont_b");
+                assert_eq!(kind, ContinuationRelationKind::DependsOn);
+                assert_eq!(reason.as_deref(), Some("a needs b"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relation_create_request_body_serializes_snake_case_kind_and_reason() {
+        let body = relation_create_request_body(
+            "cont_a".to_string(),
+            "cont_b".to_string(),
+            ContinuationRelationKind::DependsOn,
+            Some("a needs b".to_string()),
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["from_id"], "cont_a");
+        assert_eq!(json["to_id"], "cont_b");
+        assert_eq!(json["kind"], "depends_on");
+        assert_eq!(json["reason"], "a needs b");
+    }
+
+    #[test]
+    fn parses_relation_list_command() {
+        let cli = Cli::parse_from(["tfk", "relation", "list"]);
+
+        assert!(matches!(
+            cli.command,
+            Command::Relation {
+                command: RelationCommand::List
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_relation_kind() {
+        let error = Cli::try_parse_from([
+            "tfk",
+            "relation",
+            "create",
+            "--from-id",
+            "cont_a",
+            "--to-id",
+            "cont_b",
+            "--kind",
+            "maybe",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
