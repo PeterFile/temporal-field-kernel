@@ -1,10 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::bail;
 use clap::{Parser, Subcommand};
+use serde::de::DeserializeOwned;
 use tfk_protocol::{
-    ContinuationInput, ContinuationStatus, ContinuationType, EventSource, LensRequest,
-    PreflightSignals, RawEventInput,
+    CommitRequest, ContinuationInput, ContinuationStatus, ContinuationType, EventSource,
+    ForecastRequest, LensRequest, PreflightSignals, RawEventInput, TemporalDeltaInput,
 };
 
 #[derive(Debug, Parser)]
@@ -52,6 +53,21 @@ enum Command {
         #[command(subcommand)]
         command: CommitmentCommand,
     },
+    /// Create structured commitments through the local tfkd daemon.
+    Commit {
+        #[command(subcommand)]
+        command: CommitCommand,
+    },
+    /// Request action-loop forecast scoring through the local tfkd daemon.
+    Forecast {
+        #[arg(long)]
+        json_file: PathBuf,
+    },
+    /// Apply an action-loop temporal delta through the local tfkd daemon.
+    Assimilate {
+        #[arg(long)]
+        json_file: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -82,6 +98,28 @@ enum ContinuationCommand {
 enum CommitmentCommand {
     /// List active structured commitments.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+enum CommitCommand {
+    /// Create a structured commitment.
+    Create {
+        #[arg(long)]
+        speaker: String,
+        #[arg(long)]
+        statement: String,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        deadline: Option<String>,
+        #[arg(
+            long,
+            required = true,
+            action = clap::ArgAction::Set,
+            value_parser = clap::value_parser!(bool)
+        )]
+        revocable: bool,
+    },
 }
 
 #[tokio::main]
@@ -172,6 +210,33 @@ async fn main() -> anyhow::Result<()> {
                 print_json(&response)?;
             }
         },
+        Command::Commit { command } => match command {
+            CommitCommand::Create {
+                speaker,
+                statement,
+                scope,
+                deadline,
+                revocable,
+            } => {
+                let body = commit_request_body(speaker, statement, scope, deadline, revocable)?;
+                let response =
+                    tfk_cli::request_json_over_uds(&socket_path, commit_create_endpoint(), &body)
+                        .await?;
+                print_json(&response)?;
+            }
+        },
+        Command::Forecast { json_file } => {
+            let body = json_file_body::<ForecastRequest>(&json_file)?;
+            let response =
+                tfk_cli::request_json_over_uds(&socket_path, forecast_endpoint(), &body).await?;
+            print_json(&response)?;
+        }
+        Command::Assimilate { json_file } => {
+            let body = json_file_body::<TemporalDeltaInput>(&json_file)?;
+            let response =
+                tfk_cli::request_json_over_uds(&socket_path, assimilate_endpoint(), &body).await?;
+            print_json(&response)?;
+        }
     }
     Ok(())
 }
@@ -213,6 +278,52 @@ fn preflight_request_body(
         externality,
         option_value_loss,
     })?)
+}
+
+fn commit_request_body(
+    speaker: String,
+    statement: String,
+    scope: Option<String>,
+    deadline: Option<String>,
+    revocable: bool,
+) -> anyhow::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&CommitRequest {
+        speaker,
+        statement,
+        scope,
+        deadline,
+        revocable,
+    })?)
+}
+
+fn json_file_body<T>(path: &Path) -> anyhow::Result<Vec<u8>>
+where
+    T: DeserializeOwned + serde::Serialize,
+{
+    let bytes = std::fs::read(path)?;
+    let request = match serde_json::from_slice::<T>(&bytes) {
+        Ok(request) => request,
+        Err(direct_error) => {
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            match value.get("request") {
+                Some(request_value) => serde_json::from_value(request_value.clone())?,
+                None => return Err(direct_error.into()),
+            }
+        }
+    };
+    Ok(serde_json::to_vec(&request)?)
+}
+
+fn commit_create_endpoint() -> &'static str {
+    "/v1/commit"
+}
+
+fn forecast_endpoint() -> &'static str {
+    "/v1/forecast"
+}
+
+fn assimilate_endpoint() -> &'static str {
+    "/v1/assimilate"
 }
 
 #[cfg(test)]
@@ -405,5 +516,203 @@ mod tests {
                 command: CommitmentCommand::List
             }
         ));
+    }
+
+    #[test]
+    fn parses_commit_create_command_with_explicit_revocable() {
+        let cli = Cli::parse_from([
+            "tfk",
+            "commit",
+            "create",
+            "--speaker",
+            "agent",
+            "--statement",
+            "ship PR1",
+            "--scope",
+            "current_project",
+            "--deadline",
+            "2026-05-07",
+            "--revocable",
+            "true",
+        ]);
+
+        match cli.command {
+            Command::Commit {
+                command:
+                    CommitCommand::Create {
+                        speaker,
+                        statement,
+                        scope,
+                        deadline,
+                        revocable,
+                    },
+            } => {
+                assert_eq!(speaker, "agent");
+                assert_eq!(statement, "ship PR1");
+                assert_eq!(scope.as_deref(), Some("current_project"));
+                assert_eq!(deadline.as_deref(), Some("2026-05-07"));
+                assert!(revocable);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_commit_create_without_explicit_revocable() {
+        let error = Cli::try_parse_from([
+            "tfk",
+            "commit",
+            "create",
+            "--speaker",
+            "agent",
+            "--statement",
+            "ship PR1",
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn commit_create_body_uses_protocol_shape() {
+        let body = commit_request_body(
+            "agent".to_string(),
+            "ship PR1".to_string(),
+            Some("current_project".to_string()),
+            None,
+            false,
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["speaker"], "agent");
+        assert_eq!(json["statement"], "ship PR1");
+        assert_eq!(json["scope"], "current_project");
+        assert!(json.get("deadline").is_none());
+        assert_eq!(json["revocable"], false);
+    }
+
+    #[test]
+    fn parses_forecast_json_file_command() {
+        let cli = Cli::parse_from(["tfk", "forecast", "--json-file", "forecast.json"]);
+
+        match cli.command {
+            Command::Forecast { json_file } => {
+                assert_eq!(json_file, PathBuf::from("forecast.json"))
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_assimilate_json_file_command() {
+        let cli = Cli::parse_from(["tfk", "assimilate", "--json-file", "/tmp/delta.json"]);
+
+        match cli.command {
+            Command::Assimilate { json_file } => {
+                assert_eq!(json_file, PathBuf::from("/tmp/delta.json"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_file_body_validates_naked_forecast_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forecast.json");
+        std::fs::write(
+            &path,
+            r#"{"actions":[{"name":"a","progress":1.0,"closure":0.0,"option_value_preserved":0.0,"risk":0.0,"irreversibility":0.0,"confusion":0.0,"friction":0.0,"temporal_debt_added":0.0,"uncertainty":0.0,"externality":0.0}]}"#,
+        )
+        .unwrap();
+
+        let body = json_file_body::<ForecastRequest>(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["actions"][0]["name"], "a");
+        assert!(json.get("relations").is_none());
+    }
+
+    #[test]
+    fn json_file_body_validates_wrapped_forecast_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forecast-fixture.json");
+        std::fs::write(
+            &path,
+            r#"{"request":{"actions":[{"name":"wrapped","progress":1.0,"closure":0.0,"option_value_preserved":0.0,"risk":0.0,"irreversibility":0.0,"confusion":0.0,"friction":0.0,"temporal_debt_added":0.0,"uncertainty":0.0,"externality":0.0}]},"fixture":"temporalbench"}"#,
+        )
+        .unwrap();
+
+        let body = json_file_body::<ForecastRequest>(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["actions"][0]["name"], "wrapped");
+        assert!(json.get("request").is_none());
+        assert!(json.get("fixture").is_none());
+    }
+
+    #[test]
+    fn json_file_body_validates_assimilate_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("delta.json");
+        std::fs::write(
+            &path,
+            r#"{"action_id":"act_1","changes":[{"continuation_id":"cont_1","delta":"advance"}]}"#,
+        )
+        .unwrap();
+
+        let body = json_file_body::<TemporalDeltaInput>(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["action_id"], "act_1");
+        assert_eq!(json["changes"][0]["delta"], "advance");
+        assert!(json.get("claims_made").is_none());
+        assert!(json.get("evidence").is_none());
+    }
+
+    #[test]
+    fn json_file_body_validates_wrapped_assimilate_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("delta-fixture.json");
+        std::fs::write(
+            &path,
+            r#"{"request":{"action_id":"act_wrapped","changes":[{"continuation_id":"cont_1","delta":"close"}]},"expected_status":"closed"}"#,
+        )
+        .unwrap();
+
+        let body = json_file_body::<TemporalDeltaInput>(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["action_id"], "act_wrapped");
+        assert_eq!(json["changes"][0]["delta"], "close");
+        assert!(json.get("request").is_none());
+        assert!(json.get("expected_status").is_none());
+    }
+
+    #[test]
+    fn json_file_body_prefers_naked_request_when_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forecast-with-metadata.json");
+        std::fs::write(
+            &path,
+            r#"{"actions":[{"name":"naked","progress":1.0,"closure":0.0,"option_value_preserved":0.0,"risk":0.0,"irreversibility":0.0,"confusion":0.0,"friction":0.0,"temporal_debt_added":0.0,"uncertainty":0.0,"externality":0.0}],"request":{"metadata":"not a wrapper"}}"#,
+        )
+        .unwrap();
+
+        let body = json_file_body::<ForecastRequest>(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["actions"][0]["name"], "naked");
+        assert!(json.get("request").is_none());
+    }
+
+    #[test]
+    fn action_loop_endpoint_paths_are_stable() {
+        assert_eq!(commit_create_endpoint(), "/v1/commit");
+        assert_eq!(forecast_endpoint(), "/v1/forecast");
+        assert_eq!(assimilate_endpoint(), "/v1/assimilate");
     }
 }
