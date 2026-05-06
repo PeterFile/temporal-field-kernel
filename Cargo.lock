@@ -1144,6 +1144,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tfk-protocol",
+ "tfk-vector",
  "thiserror",
  "time",
  "uuid",

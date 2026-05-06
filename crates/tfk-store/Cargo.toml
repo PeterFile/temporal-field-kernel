@@ -15,6 +15,7 @@ sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tfk-protocol = { path = "../tfk-protocol" }
+tfk-vector = { path = "../tfk-vector" }
 uuid.workspace = true
 
 [dev-dependencies]
