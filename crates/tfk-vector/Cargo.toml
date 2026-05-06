@@ -1,0 +1,21 @@
+[package]
+name = "tfk-vector"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Enables rusqlite-based capability probing for an already-loaded vec0 module.
+# It deliberately does not depend on the pre-v1 sqlite-vec Rust crate.
+sqlite-vec = ["dep:rusqlite"]
+
+[dependencies]
+rusqlite = { workspace = true, optional = true }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

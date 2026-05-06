@@ -12,6 +12,7 @@ crates/
   tfk-core          continuation/preflight/lens logic
   tfk-store         SQLite + JSONL temporal projection/archive
   tfk-rules         embedded Datalog-like rule engine
+  tfk-vector        optional vector index contract + sqlite-vec capability probe
   tfk-api           local API router
   tfk-daemon        tfkd binary
   tfk-cli           tfk CLI

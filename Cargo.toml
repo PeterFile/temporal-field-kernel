@@ -4,6 +4,7 @@ members = [
   "crates/tfk-core",
   "crates/tfk-store",
   "crates/tfk-rules",
+  "crates/tfk-vector",
   "crates/tfk-api",
   "crates/tfk-model-client",
   "crates/tfk-daemon",
