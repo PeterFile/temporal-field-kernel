@@ -7,8 +7,9 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tfk_protocol::{
-    CommitRequest, ContinuationDelta, ContinuationInput, ContinuationStatus, ContinuationType,
-    RawEventInput, StoredCommitment, StoredContinuation, TemporalDeltaInput,
+    AdvisoryForecastSignal, CommitRequest, ContinuationDelta, ContinuationInput,
+    ContinuationStatus, ContinuationType, RawEventInput, StoredCommitment, StoredContinuation,
+    TemporalDeltaInput,
 };
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -61,6 +62,17 @@ pub struct StoredTemporalDelta {
     pub changes_json: String,
     pub claims_json: String,
     pub evidence_json: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredAdvisoryForecastSignal {
+    pub id: String,
+    pub name: String,
+    pub confidence: f64,
+    pub model: String,
+    pub action_name: Option<String>,
+    pub reason: Option<String>,
     pub created_at: String,
 }
 
@@ -479,6 +491,65 @@ impl Store {
         Ok(Some(row_to_temporal_delta(row)?))
     }
 
+    pub fn record_advisory_forecast_signals(
+        &self,
+        signals: &[AdvisoryForecastSignal],
+    ) -> Result<Vec<StoredAdvisoryForecastSignal>> {
+        let mut stored = Vec::with_capacity(signals.len());
+        for signal in signals {
+            let id = format!("advisory_signal_{}", Uuid::new_v4().simple());
+            let now = now_rfc3339()?;
+            self.conn.execute(
+                "INSERT INTO advisory_forecast_signals (
+                    id, name, confidence, model, action_name, reason, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    &id,
+                    &signal.name,
+                    signal.confidence,
+                    &signal.model,
+                    &signal.action_name,
+                    &signal.reason,
+                    &now,
+                ],
+            )?;
+            stored.push(
+                self.get_advisory_forecast_signal(&id)?
+                    .expect("inserted advisory forecast signal must be readable"),
+            );
+        }
+        Ok(stored)
+    }
+
+    pub fn list_advisory_forecast_signals(&self) -> Result<Vec<StoredAdvisoryForecastSignal>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, confidence, model, action_name, reason, created_at
+             FROM advisory_forecast_signals
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([], row_to_advisory_forecast_signal)?;
+        let mut signals = Vec::new();
+        for row in rows {
+            signals.push(row?);
+        }
+        Ok(signals)
+    }
+
+    pub fn get_advisory_forecast_signal(
+        &self,
+        id: &str,
+    ) -> Result<Option<StoredAdvisoryForecastSignal>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, confidence, model, action_name, reason, created_at
+             FROM advisory_forecast_signals WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(row_to_advisory_forecast_signal(row)?))
+    }
+
     fn search_raw_events_fts(&self, query: &str) -> Result<Vec<String>> {
         let fts_query = fts_literal_query(query);
         let pattern = like_literal_pattern(query);
@@ -512,6 +583,20 @@ impl Store {
         }
         Ok(hits)
     }
+}
+
+fn row_to_advisory_forecast_signal(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredAdvisoryForecastSignal> {
+    Ok(StoredAdvisoryForecastSignal {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        confidence: row.get(2)?,
+        model: row.get(3)?,
+        action_name: row.get(4)?,
+        reason: row.get(5)?,
+        created_at: row.get(6)?,
+    })
 }
 
 fn row_to_temporal_delta(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredTemporalDelta> {
@@ -803,6 +888,15 @@ fn run_migrations(conn: &Connection) -> Result<()> {
           changes_json TEXT NOT NULL,
           claims_json TEXT NOT NULL,
           evidence_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS advisory_forecast_signals (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          confidence REAL NOT NULL,
+          model TEXT NOT NULL,
+          action_name TEXT,
+          reason TEXT,
           created_at TEXT NOT NULL
         );
         "#,

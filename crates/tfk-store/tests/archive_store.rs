@@ -3,8 +3,9 @@ use std::os::unix::fs::PermissionsExt as _;
 
 use tempfile::tempdir;
 use tfk_protocol::{
-    CommitRequest, ContinuationDelta, ContinuationInput, ContinuationStatus,
-    ContinuationStatusDelta, ContinuationType, EventSource, RawEventInput, TemporalDeltaInput,
+    AdvisoryForecastSignal, CommitRequest, ContinuationDelta, ContinuationInput,
+    ContinuationStatus, ContinuationStatusDelta, ContinuationType, EventSource, RawEventInput,
+    TemporalDeltaInput,
 };
 use tfk_store::Store;
 
@@ -273,6 +274,32 @@ fn temporal_delta_is_appended_and_assimilates_status_updates() {
     let updated = store.get_continuation(&created.id).unwrap().unwrap();
     assert_eq!(updated.status, ContinuationStatus::Closed);
     assert_eq!(store.list_temporal_deltas().unwrap(), vec![stored_delta]);
+}
+
+#[test]
+fn advisory_forecast_signals_are_recorded_and_listed() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let signals = vec![AdvisoryForecastSignal {
+        name: "forming_future_risk".to_string(),
+        model: "static-test".to_string(),
+        confidence: 0.8,
+        action_name: Some("verify then ship".to_string()),
+        reason: Some("unresolved risk".to_string()),
+    }];
+
+    let stored = store.record_advisory_forecast_signals(&signals).unwrap();
+
+    assert_eq!(stored.len(), 1);
+    assert!(stored[0].id.starts_with("advisory_signal_"));
+    assert_eq!(stored[0].name, "forming_future_risk");
+    assert_eq!(stored[0].confidence, 0.8);
+    assert_eq!(stored[0].model, "static-test");
+    assert_eq!(stored[0].action_name.as_deref(), Some("verify then ship"));
+    assert_eq!(stored[0].reason.as_deref(), Some("unresolved risk"));
+
+    let listed = store.list_advisory_forecast_signals().unwrap();
+    assert_eq!(listed, stored);
 }
 
 #[test]
