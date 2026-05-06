@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use tfk_eval::{
     load_fixture_events, replay_action_loop_fixture, replay_fixture, replay_forecast_fixture,
+    replay_lens_linked_raw_event_fixture,
 };
 use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{AdvisoryForecastSignal, EventSource, EvidenceStatus, ForecastRequest};
@@ -26,6 +27,11 @@ fn forecast_fixture_path() -> PathBuf {
 fn action_loop_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/temporalbench/action_loop/commit_forecast_assimilate.json")
+}
+
+fn lens_linked_raw_event_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/lens_linked_raw_event/basic.json")
 }
 
 #[test]
@@ -252,6 +258,55 @@ fn action_loop_replay_cli_prints_structured_json_summary() {
     assert_eq!(value["reopened_status"], "closed");
     assert_eq!(value["commitment_constraint_count_after_assimilate"], 0);
     assert_eq!(value["active_pressure_count_after_assimilate"], 0);
+    assert_eq!(value["ok"], true);
+}
+
+#[test]
+fn lens_linked_raw_event_replay_promotes_active_link_then_falls_back_after_close() {
+    let summary =
+        replay_lens_linked_raw_event_fixture(&lens_linked_raw_event_fixture_path()).unwrap();
+
+    assert_eq!(summary.raw_event_hit_count, 1);
+    assert_eq!(summary.before_stance, "act");
+    assert_eq!(summary.before_active_continuation_count, 1);
+    assert_eq!(
+        summary.before_active_continuation_titles,
+        vec!["owner handoff"]
+    );
+    assert_eq!(summary.assimilated_status, "closed");
+    assert_eq!(summary.after_stance, "grounded_recall");
+    assert_eq!(summary.after_active_continuation_count, 0);
+    assert!(summary.ok);
+}
+
+#[test]
+fn lens_linked_raw_event_cli_prints_structured_json_summary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tfk-eval"))
+        .args([
+            "lens-linked-raw-event",
+            "--fixture",
+            lens_linked_raw_event_fixture_path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["raw_event_hit_count"], 1);
+    assert_eq!(value["before_stance"], "act");
+    assert_eq!(value["before_active_continuation_count"], 1);
+    assert_eq!(
+        value["before_active_continuation_titles"][0],
+        "owner handoff"
+    );
+    assert_eq!(value["assimilated_status"], "closed");
+    assert_eq!(value["after_stance"], "grounded_recall");
+    assert_eq!(value["after_active_continuation_count"], 0);
     assert_eq!(value["ok"], true);
 }
 

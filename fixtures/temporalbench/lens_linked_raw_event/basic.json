@@ -1,0 +1,30 @@
+{
+  "raw_event": {
+    "source": "user",
+    "content": "needle42 evidence lives only in the raw event"
+  },
+  "continuation": {
+    "title": "owner handoff",
+    "summary": "waiting on the maintainer response",
+    "continuation_type": "obligation",
+    "status": "active"
+  },
+  "lens": {
+    "query": "needle42",
+    "horizon": ["next-action"],
+    "perspective": ["continuation", "evidence"]
+  },
+  "assimilation": {
+    "action_id": "close linked continuation",
+    "delta": "close"
+  },
+  "expected": {
+    "raw_event_hit_count": 1,
+    "before_stance": "act",
+    "before_active_continuation_count": 1,
+    "before_active_continuation_titles": ["owner handoff"],
+    "assimilated_status": "closed",
+    "after_stance": "grounded_recall",
+    "after_active_continuation_count": 0
+  }
+}
