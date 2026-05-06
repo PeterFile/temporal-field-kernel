@@ -6,9 +6,10 @@ use tempfile::tempdir;
 use tfk_model_client::{ForecastPredictionClient, ModelClientError, StaticForecastClient};
 use tfk_protocol::{
     AdvisoryForecastSignal, ApiEnvelope, CandidateAction, CommitRequest, ContinuationDelta,
-    ContinuationInput, ContinuationStatus, ContinuationStatusDelta, ContinuationType, EventSource,
-    ForecastRequest, ForecastResult, LensCard, LensRequest, PreflightResult, PreflightSignals,
-    RawEventInput, StoredCommitment, StoredContinuation, TemporalDeltaInput,
+    ContinuationInput, ContinuationRelationEdge, ContinuationRelationKind, ContinuationStatus,
+    ContinuationStatusDelta, ContinuationType, EventSource, ForecastRequest, ForecastResult,
+    LensCard, LensRequest, PreflightResult, PreflightSignals, RawEventInput, StoredCommitment,
+    StoredContinuation, TemporalDeltaInput,
 };
 use tfk_store::{Store, StoredRawEvent};
 use tower::ServiceExt;
@@ -317,6 +318,76 @@ async fn continuation_endpoint_accepts_legacy_body_without_type() {
 }
 
 #[tokio::test]
+async fn continuation_relations_endpoint_roundtrips() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let left = create_continuation_via_api(&app, "shared query left").await;
+    let right = create_continuation_via_api(&app, "shared query right").await;
+    let relation = ContinuationRelationEdge {
+        from_id: left.id,
+        to_id: right.id,
+        kind: ContinuationRelationKind::Blocks,
+        reason: Some("right waits for left".to_string()),
+    };
+
+    let create_response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/continuation-relations",
+            &relation,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let create_envelope: ApiEnvelope<ContinuationRelationEdge> = read_json(create_response).await;
+    assert!(create_envelope.ok);
+    assert_eq!(create_envelope.data.unwrap(), relation);
+
+    let list_response = app
+        .oneshot(empty_request("GET", "/v1/continuation-relations"))
+        .await
+        .unwrap();
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_envelope: ApiEnvelope<Vec<ContinuationRelationEdge>> = read_json(list_response).await;
+    assert!(list_envelope.ok);
+    assert_eq!(list_envelope.data.unwrap(), vec![relation]);
+}
+
+#[tokio::test]
+async fn continuation_relations_endpoint_rejects_unknown_endpoint() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let relation = ContinuationRelationEdge {
+        from_id: "missing-left".to_string(),
+        to_id: "missing-right".to_string(),
+        kind: ContinuationRelationKind::Conflicts,
+        reason: Some("invalid endpoints".to_string()),
+    };
+
+    let response = app
+        .oneshot(json_request(
+            "POST",
+            "/v1/continuation-relations",
+            &relation,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let envelope: ApiEnvelope<serde_json::Value> = read_json(response).await;
+    assert!(!envelope.ok);
+    assert!(envelope
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("invalid continuation relation")));
+}
+
+#[tokio::test]
 async fn lens_recalls_matching_continuation_before_raw_event_fallback() {
     let tmp = tempdir().unwrap();
     let store = open_test_store(tmp.path());
@@ -365,6 +436,84 @@ async fn lens_recalls_matching_continuation_before_raw_event_fallback() {
     let card = lens_envelope.data.unwrap();
     assert_eq!(card.stance, "continuation_recall");
     assert!(card.why_now.contains("1 matching continuation"));
+}
+
+#[tokio::test]
+async fn lens_uses_persisted_active_continuation_relations() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let left = create_continuation_via_api(&app, "shared relation query left").await;
+    let right = create_continuation_via_api(&app, "shared relation query right").await;
+    let relation = ContinuationRelationEdge {
+        from_id: left.id.clone(),
+        to_id: right.id.clone(),
+        kind: ContinuationRelationKind::Blocks,
+        reason: Some("stored block reason".to_string()),
+    };
+    app.clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/continuation-relations",
+            &relation,
+        ))
+        .await
+        .unwrap();
+    let lens = LensRequest {
+        query: "shared relation query".to_string(),
+        horizon: Vec::new(),
+        perspective: Vec::new(),
+    };
+
+    let blocked_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/lens", &lens))
+        .await
+        .unwrap();
+
+    assert_eq!(blocked_response.status(), StatusCode::OK);
+    let blocked_envelope: ApiEnvelope<LensCard> = read_json(blocked_response).await;
+    let blocked_card = blocked_envelope.data.unwrap();
+    assert_eq!(blocked_card.stance, "verify");
+    assert!(blocked_card.preferred_action.is_none());
+    assert!(blocked_card.boundaries.iter().any(|boundary| {
+        boundary.kind == "relation_block"
+            && boundary.reason.as_deref() == Some("stored block reason")
+    }));
+    assert!(blocked_card
+        .avoid
+        .iter()
+        .any(|item| item.contains("blocked") || item.contains("collapse related")));
+
+    app.clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/assimilate",
+            &TemporalDeltaInput {
+                action_id: "close-relation-endpoint".to_string(),
+                changes: vec![ContinuationStatusDelta {
+                    continuation_id: left.id,
+                    delta: ContinuationDelta::Close,
+                }],
+                claims_made: Vec::new(),
+                evidence: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let closed_response = app
+        .oneshot(json_request("POST", "/v1/lens", &lens))
+        .await
+        .unwrap();
+
+    assert_eq!(closed_response.status(), StatusCode::OK);
+    let closed_envelope: ApiEnvelope<LensCard> = read_json(closed_response).await;
+    let closed_card = closed_envelope.data.unwrap();
+    assert!(!closed_card
+        .boundaries
+        .iter()
+        .any(|boundary| boundary.kind == "relation_block" || boundary.kind == "relation_conflict"));
 }
 
 #[tokio::test]
@@ -689,6 +838,27 @@ async fn assimilate_endpoint_rejects_missing_status_target() {
 fn open_test_store(root: &std::path::Path) -> Store {
     let data_dir = root.join("data");
     Store::open(data_dir.join("tfk.db"), data_dir.join("archive")).unwrap()
+}
+
+async fn create_continuation_via_api(app: &axum::Router, title: &str) -> StoredContinuation {
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/continuations",
+            &ContinuationInput {
+                title: title.to_string(),
+                summary: "relation test summary".to_string(),
+                continuation_type: ContinuationType::Obligation,
+                status: ContinuationStatus::Active,
+                parent_id: None,
+                raw_event_id: None,
+            },
+        ))
+        .await
+        .unwrap();
+    let envelope: ApiEnvelope<StoredContinuation> = read_json(response).await;
+    envelope.data.unwrap()
 }
 
 fn forecast_request() -> ForecastRequest {

@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 use tfk_protocol::{
     AdvisoryForecastSignal, CommitRequest, ContinuationDelta, ContinuationInput,
-    ContinuationStatus, ContinuationStatusDelta, ContinuationType, EventSource, RawEventInput,
-    TemporalDeltaInput,
+    ContinuationRelationEdge, ContinuationRelationKind, ContinuationStatus,
+    ContinuationStatusDelta, ContinuationType, EventSource, RawEventInput, TemporalDeltaInput,
 };
 use tfk_store::Store;
 use tfk_vector::{
@@ -321,6 +321,99 @@ fn active_continuations_for_raw_event_ids_filters_non_active_statuses() {
     assert!(!linked
         .iter()
         .any(|continuation| continuation.id == closed.id));
+}
+
+#[test]
+fn continuation_relations_roundtrip_and_reopen() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let db_path = data_dir.join("tfk.db");
+    let archive_dir = data_dir.join("archive");
+    let (left_id, right_id, relation) = {
+        let store = Store::open(&db_path, &archive_dir).unwrap();
+        let left =
+            create_test_continuation(&store, "shared query left", ContinuationStatus::Active);
+        let right =
+            create_test_continuation(&store, "shared query right", ContinuationStatus::Active);
+        let relation = ContinuationRelationEdge {
+            from_id: left.id.clone(),
+            to_id: right.id.clone(),
+            kind: ContinuationRelationKind::Blocks,
+            reason: Some("right cannot proceed while left is unresolved".to_string()),
+        };
+
+        let created = store.create_continuation_relation(&relation).unwrap();
+
+        assert_eq!(created, relation);
+        assert_eq!(
+            store.list_continuation_relations().unwrap(),
+            vec![relation.clone()]
+        );
+        (left.id, right.id, relation)
+    };
+
+    let reopened = Store::open(&db_path, &archive_dir).unwrap();
+    assert_eq!(
+        reopened.list_continuation_relations().unwrap(),
+        vec![relation.clone()]
+    );
+    assert_eq!(
+        reopened
+            .active_continuation_relations_for_continuation_ids(&[right_id])
+            .unwrap(),
+        vec![relation.clone()]
+    );
+    assert!(reopened
+        .active_continuation_relations_for_continuation_ids(&[left_id])
+        .unwrap()
+        .contains(&relation));
+}
+
+#[test]
+fn active_continuation_relations_filter_non_active_endpoints() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_test_store(tmp.path());
+    let active =
+        create_test_continuation(&store, "shared query active", ContinuationStatus::Active);
+    let blocked =
+        create_test_continuation(&store, "shared query blocked", ContinuationStatus::Active);
+    let closed =
+        create_test_continuation(&store, "shared query closed", ContinuationStatus::Active);
+    let active_relation = ContinuationRelationEdge {
+        from_id: active.id.clone(),
+        to_id: blocked.id.clone(),
+        kind: ContinuationRelationKind::Blocks,
+        reason: Some("blocked by active endpoint".to_string()),
+    };
+    let inactive_relation = ContinuationRelationEdge {
+        from_id: active.id.clone(),
+        to_id: closed.id.clone(),
+        kind: ContinuationRelationKind::Conflicts,
+        reason: Some("closed endpoint must not constrain lens".to_string()),
+    };
+    store
+        .create_continuation_relation(&active_relation)
+        .unwrap();
+    store
+        .create_continuation_relation(&inactive_relation)
+        .unwrap();
+    store
+        .assimilate_delta(&TemporalDeltaInput {
+            action_id: "close-related-endpoint".to_string(),
+            changes: vec![ContinuationStatusDelta {
+                continuation_id: closed.id,
+                delta: ContinuationDelta::Close,
+            }],
+            claims_made: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .unwrap();
+
+    let active_relations = store
+        .active_continuation_relations_for_continuation_ids(&[active.id])
+        .unwrap();
+
+    assert_eq!(active_relations, vec![active_relation]);
 }
 
 #[test]
@@ -660,6 +753,23 @@ impl VectorIndex for FailingVectorIndex {
 fn open_test_store(root: &std::path::Path) -> Store {
     let data_dir = root.join("data");
     Store::open(data_dir.join("tfk.db"), data_dir.join("archive")).unwrap()
+}
+
+fn create_test_continuation(
+    store: &Store,
+    title: &str,
+    status: ContinuationStatus,
+) -> tfk_protocol::StoredContinuation {
+    store
+        .create_continuation(&ContinuationInput {
+            title: title.to_string(),
+            summary: "relation test summary".to_string(),
+            continuation_type: ContinuationType::Obligation,
+            status,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap()
 }
 
 fn mode(path: &std::path::Path) -> u32 {

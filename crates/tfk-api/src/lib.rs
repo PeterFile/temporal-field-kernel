@@ -10,9 +10,10 @@ use serde_json::{json, Value};
 use tfk_core::{ForecastScorer, PreflightScorer, TimeFieldContinuation, TimeFieldLensEngine};
 use tfk_model_client::ForecastPredictionClient;
 use tfk_protocol::{
-    ApiEnvelope, CommitRequest, ContinuationInput, ContinuationStatus, ContinuationType,
-    ForecastRequest, ForecastResult, LensCard, LensRequest, PreflightResult, PreflightSignals,
-    ProvenanceRef, RawEventInput, StoredCommitment, StoredContinuation, TemporalDeltaInput,
+    ApiEnvelope, CommitRequest, ContinuationInput, ContinuationRelationEdge, ContinuationStatus,
+    ContinuationType, ForecastRequest, ForecastResult, LensCard, LensRequest, PreflightResult,
+    PreflightSignals, ProvenanceRef, RawEventInput, StoredCommitment, StoredContinuation,
+    TemporalDeltaInput,
 };
 use tfk_store::{Store, StoreError, StoredRawEvent, StoredTemporalDelta};
 
@@ -57,6 +58,10 @@ pub fn router_with_state(state: ApiState) -> Router {
             post(create_continuation_handler).get(list_continuations_handler),
         )
         .route("/v1/continuations/:id", get(get_continuation_handler))
+        .route(
+            "/v1/continuation-relations",
+            post(create_continuation_relation_handler).get(list_continuation_relations_handler),
+        )
         .route("/v1/preflight", post(preflight_handler))
         .route("/v1/lens", post(lens_handler))
         .route("/v1/forecast", post(forecast_handler))
@@ -146,6 +151,41 @@ async fn get_continuation_handler(
         "local-continuation-get",
         "local-continuation-get",
         continuation,
+    )))
+}
+
+async fn create_continuation_relation_handler(
+    State(state): State<ApiState>,
+    Json(input): Json<ContinuationRelationEdge>,
+) -> Result<Json<ApiEnvelope<ContinuationRelationEdge>>, ApiError> {
+    let stored = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .create_continuation_relation(&input)
+        .map_err(api_error_for_relation_create)?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-continuation-relation-create",
+        "local-continuation-relation-create",
+        stored,
+    )))
+}
+
+async fn list_continuation_relations_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<ApiEnvelope<Vec<ContinuationRelationEdge>>>, ApiError> {
+    let relations = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .list_continuation_relations()
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-continuation-relation-list",
+        "local-continuation-relation-list",
+        relations,
     )))
 }
 
@@ -283,7 +323,7 @@ async fn lens_handler(
     State(state): State<ApiState>,
     Json(request): Json<LensRequest>,
 ) -> Result<Json<ApiEnvelope<LensCard>>, ApiError> {
-    let (continuations, events, commitment_constraints, promoted_raw_event_ids) = {
+    let (continuations, events, commitment_constraints, relations, promoted_raw_event_ids) = {
         let store = state
             .store
             .lock()
@@ -330,10 +370,18 @@ async fn lens_handler(
             }
         }
         if !continuations.is_empty() {
+            let continuation_ids: Vec<_> = continuations
+                .iter()
+                .map(|continuation| continuation.id.clone())
+                .collect();
+            let relations = store
+                .active_continuation_relations_for_continuation_ids(&continuation_ids)
+                .map_err(|error| internal_error(error.to_string()))?;
             (
                 continuations,
                 Vec::new(),
                 commitment_constraints,
+                relations,
                 Vec::new(),
             )
         } else {
@@ -353,7 +401,7 @@ async fn lens_handler(
                         events.push(event);
                     }
                 }
-                (continuations, events, Vec::new(), Vec::new())
+                (continuations, events, Vec::new(), Vec::new(), Vec::new())
             } else {
                 let continuation_ids: Vec<_> = linked_continuations
                     .iter()
@@ -362,10 +410,14 @@ async fn lens_handler(
                 let commitment_constraints = store
                     .active_commitments_for_continuations(&continuation_ids)
                     .map_err(|error| internal_error(error.to_string()))?;
+                let relations = store
+                    .active_continuation_relations_for_continuation_ids(&continuation_ids)
+                    .map_err(|error| internal_error(error.to_string()))?;
                 (
                     linked_continuations,
                     Vec::new(),
                     commitment_constraints,
+                    relations,
                     hits,
                 )
             }
@@ -397,7 +449,12 @@ async fn lens_handler(
                 status: continuation.status,
             })
             .collect();
-        TimeFieldLensEngine.generate(&request, &time_field_continuations, 0)
+        TimeFieldLensEngine.generate_with_relations(
+            &request,
+            &time_field_continuations,
+            &relations,
+            0,
+        )
     };
     if !commitment_constraints.is_empty() {
         card.commitment_constraints = commitment_constraints;
@@ -490,6 +547,13 @@ type ApiError = (StatusCode, Json<ApiEnvelope<Value>>);
 fn api_error_for_store(error: StoreError) -> ApiError {
     match error {
         StoreError::InvalidTemporalDelta(message) => invalid_request_error(message),
+        other => internal_error(other.to_string()),
+    }
+}
+
+fn api_error_for_relation_create(error: StoreError) -> ApiError {
+    match error {
+        StoreError::Sqlite(_) => invalid_request_error("invalid continuation relation"),
         other => internal_error(other.to_string()),
     }
 }
