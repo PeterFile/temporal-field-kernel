@@ -24,6 +24,6 @@
 
 ## v0.3
 
-- sqlite-vec adapter
+- sqlite-vec adapter (optional `tfk-vector` contract with Noop fallback; runtime must probe `vec0` before creating virtual tables)
 - optional Python sidecar with river
 - advisory forming-future prediction table

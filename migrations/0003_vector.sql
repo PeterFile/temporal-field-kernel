@@ -1,2 +1,23 @@
--- Placeholder for sqlite-vec/sqlite-vss virtual tables.
--- Vector search must stay optional; NoopVectorIndex remains the fallback.
+-- Optional sqlite-vec schema notes.
+--
+-- Do not run this file unconditionally. sqlite-vec is pre-v1 and its vec0
+-- module must be loaded before any virtual table below can be created. The
+-- Rust default path must keep using NoopVectorIndex when sqlite-vec is absent.
+--
+-- Current adapter contract:
+--   1. Probe vec0 first with a temp virtual table.
+--   2. If the probe fails, skip vector setup and keep observe/lens behavior intact.
+--   3. If the probe succeeds, adapter-owned tables may use the vec0 shape below.
+--
+-- Example shape for a future enabled runtime:
+--
+-- CREATE TABLE IF NOT EXISTS vector_documents (
+--   rowid INTEGER PRIMARY KEY,
+--   source_id TEXT NOT NULL UNIQUE,
+--   kind TEXT NOT NULL,
+--   text TEXT NOT NULL
+-- );
+--
+-- CREATE VIRTUAL TABLE IF NOT EXISTS vec_documents USING vec0(
+--   embedding float[384]
+-- );
