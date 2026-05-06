@@ -2,6 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ use tfk_protocol::{
     ContinuationStatus, ContinuationType, RawEventInput, StoredCommitment, StoredContinuation,
     TemporalDeltaInput,
 };
+use tfk_vector::{NoopVectorIndex, VectorDocument, VectorIndex, VectorIndexStatus};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -35,6 +37,7 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 pub struct Store {
     conn: Connection,
     archive_dir: PathBuf,
+    vector_index: Arc<dyn VectorIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +81,14 @@ pub struct StoredAdvisoryForecastSignal {
 
 impl Store {
     pub fn open(db_path: impl AsRef<Path>, archive_dir: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_vector_index(db_path, archive_dir, Arc::new(NoopVectorIndex::default()))
+    }
+
+    pub fn open_with_vector_index(
+        db_path: impl AsRef<Path>,
+        archive_dir: impl AsRef<Path>,
+        vector_index: Arc<dyn VectorIndex>,
+    ) -> Result<Self> {
         let db_path = db_path.as_ref();
         let archive_dir = archive_dir.as_ref().to_path_buf();
         if let Some(parent) = db_path.parent() {
@@ -97,7 +108,15 @@ impl Store {
         restrict_file_if_exists(&wal_path(db_path))?;
         restrict_file_if_exists(&shm_path(db_path))?;
 
-        Ok(Self { conn, archive_dir })
+        Ok(Self {
+            conn,
+            archive_dir,
+            vector_index,
+        })
+    }
+
+    pub fn vector_index_status(&self) -> VectorIndexStatus {
+        self.vector_index.status()
     }
 
     pub fn append_raw_event(&self, input: &RawEventInput) -> Result<StoredRawEvent> {
@@ -173,9 +192,12 @@ impl Store {
             params![id, input.content],
         )?;
 
-        Ok(self
+        let stored = self
             .get_raw_event(&id)?
-            .expect("inserted raw event must be readable"))
+            .expect("inserted raw event must be readable");
+        let document = VectorDocument::raw_event(&stored.id, &stored.content);
+        let _ = self.vector_index.upsert(&document);
+        Ok(stored)
     }
 
     pub fn get_raw_event(&self, id: &str) -> Result<Option<StoredRawEvent>> {

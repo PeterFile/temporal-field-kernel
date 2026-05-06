@@ -1,5 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
+use std::sync::{Arc, Mutex};
 
 use tempfile::tempdir;
 use tfk_protocol::{
@@ -8,6 +9,10 @@ use tfk_protocol::{
     TemporalDeltaInput,
 };
 use tfk_store::Store;
+use tfk_vector::{
+    VectorDocument, VectorDocumentKind, VectorError, VectorHit, VectorIndex, VectorIndexOutcome,
+    VectorIndexStatus,
+};
 
 #[test]
 fn appending_raw_event_writes_jsonl_and_sqlite_index() {
@@ -29,6 +34,75 @@ fn appending_raw_event_writes_jsonl_and_sqlite_index() {
     let jsonl = fs::read_to_string(archive_dir.join("events-000001.jsonl")).unwrap();
     assert!(jsonl.contains("不要做项目状态机"));
     assert!(jsonl.contains(&stored.id));
+}
+
+#[test]
+fn default_store_uses_noop_vector_index() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+
+    assert_eq!(
+        store.vector_index_status(),
+        VectorIndexStatus::unavailable("noop", "vector backend is not configured")
+    );
+}
+
+#[test]
+fn appending_raw_event_upserts_raw_event_vector_document() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let index = Arc::new(RecordingVectorIndex::default());
+    let store = Store::open_with_vector_index(
+        data_dir.join("tfk.db"),
+        data_dir.join("archive"),
+        index.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        store.vector_index_status(),
+        VectorIndexStatus::available("recording")
+    );
+
+    let stored = store
+        .append_raw_event(&RawEventInput::new_text(
+            "s1",
+            "cli",
+            EventSource::User,
+            "index this observation",
+        ))
+        .unwrap();
+
+    let documents = index.documents.lock().unwrap();
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].source_id, stored.id);
+    assert_eq!(documents[0].kind, VectorDocumentKind::RawEvent);
+    assert_eq!(documents[0].text, "index this observation");
+}
+
+#[test]
+fn vector_upsert_failure_does_not_fail_raw_event_append() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let store = Store::open_with_vector_index(
+        data_dir.join("tfk.db"),
+        data_dir.join("archive"),
+        Arc::new(FailingVectorIndex),
+    )
+    .unwrap();
+
+    let stored = store
+        .append_raw_event(&RawEventInput::new_text(
+            "s1",
+            "cli",
+            EventSource::User,
+            "vector backend may be down",
+        ))
+        .unwrap();
+
+    assert_eq!(
+        store.get_raw_event(&stored.id).unwrap().unwrap().content,
+        "vector backend may be down"
+    );
 }
 
 #[test]
@@ -491,6 +565,51 @@ fn temporal_delta_rejects_missing_status_target_and_rolls_back() {
     assert!(store.list_temporal_deltas().unwrap().is_empty());
     let unchanged = store.get_continuation(&existing.id).unwrap().unwrap();
     assert_eq!(unchanged.status, ContinuationStatus::Active);
+}
+
+#[derive(Debug, Default)]
+struct RecordingVectorIndex {
+    documents: Mutex<Vec<VectorDocument>>,
+}
+
+impl VectorIndex for RecordingVectorIndex {
+    fn status(&self) -> VectorIndexStatus {
+        VectorIndexStatus::available("recording")
+    }
+
+    fn upsert(&self, document: &VectorDocument) -> tfk_vector::Result<VectorIndexOutcome> {
+        self.documents.lock().unwrap().push(document.clone());
+        Ok(VectorIndexOutcome::Indexed)
+    }
+
+    fn search(
+        &self,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> tfk_vector::Result<Vec<VectorHit>> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Debug)]
+struct FailingVectorIndex;
+
+impl VectorIndex for FailingVectorIndex {
+    fn status(&self) -> VectorIndexStatus {
+        VectorIndexStatus::available("failing")
+    }
+
+    fn upsert(&self, _document: &VectorDocument) -> tfk_vector::Result<VectorIndexOutcome> {
+        Err(VectorError::Backend("boom".to_string()))
+    }
+
+    fn search(
+        &self,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> tfk_vector::Result<Vec<VectorHit>> {
+        Ok(Vec::new())
+    }
 }
 
 fn open_test_store(root: &std::path::Path) -> Store {
