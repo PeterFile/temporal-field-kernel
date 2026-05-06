@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use tfk_eval::{replay_action_loop_fixture, replay_fixture, replay_forecast_fixture};
+use tfk_eval::{
+    replay_action_loop_fixture, replay_fixture, replay_forecast_fixture,
+    replay_lens_linked_raw_event_fixture,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "tfk-eval", about = "TemporalBench fixture runner")]
@@ -27,6 +30,10 @@ enum Command {
         #[arg(long)]
         fixture: PathBuf,
     },
+    LensLinkedRawEvent {
+        #[arg(long)]
+        fixture: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -42,6 +49,10 @@ fn main() -> anyhow::Result<()> {
         }
         Command::ActionLoop { fixture } => {
             let summary = replay_action_loop_fixture(&fixture)?;
+            println!("{}", serde_json::to_string(&summary)?);
+        }
+        Command::LensLinkedRawEvent { fixture } => {
+            let summary = replay_lens_linked_raw_event_fixture(&fixture)?;
             println!("{}", serde_json::to_string(&summary)?);
         }
     }

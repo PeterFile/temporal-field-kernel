@@ -46,6 +46,19 @@ pub struct ActionLoopReplaySummary {
     pub ok: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LensLinkedRawEventReplaySummary {
+    pub fixture_path: String,
+    pub raw_event_hit_count: usize,
+    pub before_stance: String,
+    pub before_active_continuation_count: usize,
+    pub before_active_continuation_titles: Vec<String>,
+    pub assimilated_status: String,
+    pub after_stance: String,
+    pub after_active_continuation_count: usize,
+    pub ok: bool,
+}
+
 pub fn load_fixture_events(path: &Path) -> anyhow::Result<Vec<RawEventInput>> {
     let file =
         File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
@@ -242,6 +255,80 @@ pub fn replay_action_loop_fixture(path: &Path) -> anyhow::Result<ActionLoopRepla
     })
 }
 
+pub fn replay_lens_linked_raw_event_fixture(
+    path: &Path,
+) -> anyhow::Result<LensLinkedRawEventReplaySummary> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
+    let fixture: LensLinkedRawEventFixture = serde_json::from_reader(file)
+        .with_context(|| format!("invalid fixture {}", path.display()))?;
+    let tmp = tempfile::tempdir().context("failed to create lens-linked temp directory")?;
+    let data_dir = tmp.path().join("store");
+    let mut store = Store::open(data_dir.join("tfk.db"), data_dir.join("archive"))
+        .context("failed to open lens-linked store")?;
+
+    let raw_event = store
+        .append_raw_event(&fixture.raw_event.into())
+        .context("failed to append linked raw event")?;
+    let mut continuation_input = fixture.continuation;
+    continuation_input.raw_event_id = Some(raw_event.id.clone());
+    let continuation = store
+        .create_continuation(&continuation_input)
+        .context("failed to create linked continuation")?;
+
+    let raw_event_hit_count = store
+        .search_raw_events(&fixture.lens.query)
+        .context("failed to search linked raw events")?
+        .len();
+    let before = lens_from_store(&store, &fixture.lens)
+        .context("failed to run pre-assimilate linked lens")?;
+
+    store
+        .assimilate_delta(&TemporalDeltaInput {
+            action_id: fixture.assimilation.action_id,
+            changes: vec![ContinuationStatusDelta {
+                continuation_id: continuation.id.clone(),
+                delta: fixture.assimilation.delta,
+            }],
+            claims_made: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .context("failed to close linked continuation")?;
+    let assimilated_status = store
+        .get_continuation(&continuation.id)
+        .context("failed to read closed linked continuation")?
+        .map(|stored| status_name(stored.status).to_string())
+        .unwrap_or_default();
+
+    let after = lens_from_store(&store, &fixture.lens)
+        .context("failed to run post-assimilate linked lens")?;
+    let before_active_continuation_titles: Vec<_> = before
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.title.clone())
+        .collect();
+
+    let ok = raw_event_hit_count == fixture.expected.raw_event_hit_count
+        && before.stance == fixture.expected.before_stance
+        && before.active_continuations.len() == fixture.expected.before_active_continuation_count
+        && before_active_continuation_titles == fixture.expected.before_active_continuation_titles
+        && assimilated_status == fixture.expected.assimilated_status
+        && after.stance == fixture.expected.after_stance
+        && after.active_continuations.len() == fixture.expected.after_active_continuation_count;
+
+    Ok(LensLinkedRawEventReplaySummary {
+        fixture_path: path.to_string_lossy().to_string(),
+        raw_event_hit_count,
+        before_stance: before.stance,
+        before_active_continuation_count: before.active_continuations.len(),
+        before_active_continuation_titles,
+        assimilated_status,
+        after_stance: after.stance,
+        after_active_continuation_count: after.active_continuations.len(),
+        ok,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct ForecastFixture {
     request: ForecastRequest,
@@ -282,6 +369,26 @@ struct ActionLoopExpected {
     reopened_status: String,
     commitment_constraint_count_after_assimilate: usize,
     active_pressure_count_after_assimilate: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct LensLinkedRawEventFixture {
+    raw_event: FixtureEventRecord,
+    continuation: tfk_protocol::ContinuationInput,
+    lens: LensRequest,
+    assimilation: ActionLoopAssimilation,
+    expected: LensLinkedRawEventExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct LensLinkedRawEventExpected {
+    raw_event_hit_count: usize,
+    before_stance: String,
+    before_active_continuation_count: usize,
+    before_active_continuation_titles: Vec<String>,
+    assimilated_status: String,
+    after_stance: String,
+    after_active_continuation_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,20 +438,87 @@ fn lens_from_store(store: &Store, request: &LensRequest) -> anyhow::Result<LensC
         }
     }
 
-    let commitment_constraints = store
+    let mut commitment_constraints = store
         .active_commitments_for_continuations(&continuation_ids)
         .context("failed to load active commitment constraints")?;
+    for commitment in store
+        .search_active_commitments(&request.query)
+        .context("failed to search active commitments")?
+    {
+        if !commitment_constraints
+            .iter()
+            .any(|stored| stored.id == commitment.id)
+        {
+            if let Some(continuation) = store
+                .get_continuation(&commitment.continuation_id)
+                .context("failed to load active commitment continuation")?
+            {
+                if !continuations
+                    .iter()
+                    .any(|stored| stored.id == continuation.id)
+                {
+                    continuations.push(continuation);
+                }
+            }
+            commitment_constraints.push(commitment);
+        }
+    }
+
+    let mut raw_event_count = 0;
+    let mut promoted_raw_event_ids = Vec::new();
+    if continuations.is_empty() {
+        let hits = store
+            .search_raw_events(&request.query)
+            .context("failed to search raw events")?;
+        let linked_continuations = store
+            .active_continuations_for_raw_event_ids(&hits)
+            .context("failed to load active continuations linked to raw events")?;
+        if linked_continuations.is_empty() {
+            for id in hits {
+                if store
+                    .get_raw_event(&id)
+                    .context("failed to load raw event search hit")?
+                    .is_some()
+                {
+                    raw_event_count += 1;
+                }
+            }
+        } else {
+            let linked_ids: Vec<_> = linked_continuations
+                .iter()
+                .map(|continuation| continuation.id.clone())
+                .collect();
+            commitment_constraints = store
+                .active_commitments_for_continuations(&linked_ids)
+                .context("failed to load linked active commitment constraints")?;
+            continuations = linked_continuations;
+            promoted_raw_event_ids = hits;
+        }
+    }
+
     let time_field_continuations: Vec<_> = continuations
         .into_iter()
         .map(|continuation| TimeFieldContinuation {
             id: continuation.id,
             title: continuation.title,
-            summary: continuation.summary,
+            summary: if continuation
+                .raw_event_id
+                .as_ref()
+                .is_some_and(|raw_event_id| promoted_raw_event_ids.contains(raw_event_id))
+            {
+                // The raw-event search already proved the query matches evidence linked to
+                // this continuation. Seed only this in-memory core projection; do not mutate
+                // the stored continuation or widen the fixture/protocol schema.
+                format!("{} {}", continuation.summary, request.query)
+            } else {
+                continuation.summary
+            },
             continuation_type: continuation.continuation_type,
             status: continuation.status,
         })
         .collect();
-    let mut card = TimeFieldLensEngine.generate(request, &time_field_continuations, 0);
+    let mut card =
+        TimeFieldLensEngine.generate(request, &time_field_continuations, raw_event_count);
     card.commitment_constraints = commitment_constraints;
     Ok(card)
 }
