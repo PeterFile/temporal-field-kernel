@@ -16,5 +16,6 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tfk-core = { path = "../tfk-core" }
+tfk-model-client = { path = "../tfk-model-client" }
 tfk-protocol = { path = "../tfk-protocol" }
 tfk-store = { path = "../tfk-store" }

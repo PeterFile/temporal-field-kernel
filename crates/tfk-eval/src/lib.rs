@@ -5,6 +5,7 @@ use std::path::Path;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tfk_core::{ForecastScorer, PreflightScorer, TimeFieldContinuation, TimeFieldLensEngine};
+use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{
     AdvisoryForecastSignal, CommitRequest, ContinuationDelta, ContinuationStatus,
     ContinuationStatusDelta, ContinuationType, EventModality, EventSource, EvidenceStatus,
@@ -112,13 +113,19 @@ pub fn replay_forecast_fixture(path: &Path) -> anyhow::Result<ForecastReplaySumm
         File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
     let fixture: ForecastFixture = serde_json::from_reader(file)
         .with_context(|| format!("invalid fixture {}", path.display()))?;
-    let result = ForecastScorer.score(&fixture.request);
+    let mut result = ForecastScorer.score(&fixture.request);
+    let client = StaticForecastClient::new(fixture.advisory_signals);
+    let signals = client
+        .forecast(&fixture.request)
+        .context("failed to run forecast advisory model client")?;
+    result.advisory_signals.extend(signals);
+
     let top_action = result
         .ranked_actions
         .first()
         .map(|action| action.name.clone())
         .unwrap_or_default();
-    let advisory_signal_names: Vec<_> = fixture
+    let advisory_signal_names: Vec<_> = result
         .advisory_signals
         .iter()
         .map(|signal| signal.name.clone())

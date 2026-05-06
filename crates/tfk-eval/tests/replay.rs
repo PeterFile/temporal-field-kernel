@@ -4,6 +4,7 @@ use std::process::Command;
 use tfk_eval::{
     load_fixture_events, replay_action_loop_fixture, replay_fixture, replay_forecast_fixture,
 };
+use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{EventSource, EvidenceStatus};
 
 fn fixture_path() -> PathBuf {
@@ -80,6 +81,19 @@ fn forecast_fixture_replay_checks_expected_top_action_and_advisory_signal() {
     assert_eq!(summary.advisory_signal_count, 1);
     assert_eq!(summary.advisory_signal_names, vec!["forming_future_risk"]);
     assert!(summary.ok);
+}
+
+#[test]
+fn forecast_fixture_advisory_signals_roundtrip_through_static_model_client() {
+    let value: serde_json::Value =
+        serde_json::from_reader(std::fs::File::open(forecast_fixture_path()).unwrap()).unwrap();
+    let request = serde_json::from_value(value["request"].clone()).unwrap();
+    let fixture_signals = serde_json::from_value(value["advisory_signals"].clone()).unwrap();
+    let client = StaticForecastClient::new(fixture_signals);
+    let signals = client.forecast(&request).unwrap();
+
+    assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0].name, "forming_future_risk");
 }
 
 #[test]
