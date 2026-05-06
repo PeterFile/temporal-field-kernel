@@ -1087,6 +1087,7 @@ dependencies = [
  "tfk-model-client",
  "tfk-protocol",
  "tfk-store",
+ "tfk-vector",
 ]
 
 [[package]]

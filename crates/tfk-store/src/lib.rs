@@ -12,7 +12,9 @@ use tfk_protocol::{
     ContinuationStatus, ContinuationType, RawEventInput, StoredCommitment, StoredContinuation,
     TemporalDeltaInput,
 };
-use tfk_vector::{NoopVectorIndex, VectorDocument, VectorIndex, VectorIndexStatus};
+use tfk_vector::{
+    NoopVectorIndex, VectorDocument, VectorDocumentKind, VectorIndex, VectorIndexStatus,
+};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -535,10 +537,17 @@ impl Store {
                     &now,
                 ],
             )?;
-            stored.push(
-                self.get_advisory_forecast_signal(&id)?
-                    .expect("inserted advisory forecast signal must be readable"),
-            );
+            let stored_signal = self
+                .get_advisory_forecast_signal(&id)?
+                .expect("inserted advisory forecast signal must be readable");
+            let document = VectorDocument {
+                source_id: stored_signal.id.clone(),
+                kind: VectorDocumentKind::AdvisoryForecastSignal,
+                text: advisory_forecast_signal_vector_text(&stored_signal),
+                embedding: None,
+            };
+            let _ = self.vector_index.upsert(&document);
+            stored.push(stored_signal);
         }
         Ok(stored)
     }
@@ -605,6 +614,17 @@ impl Store {
         }
         Ok(hits)
     }
+}
+
+fn advisory_forecast_signal_vector_text(signal: &StoredAdvisoryForecastSignal) -> String {
+    format!(
+        "name: {}\nmodel: {}\nconfidence: {}\naction_name: {}\nreason: {}",
+        signal.name,
+        signal.model,
+        signal.confidence,
+        signal.action_name.as_deref().unwrap_or_default(),
+        signal.reason.as_deref().unwrap_or_default()
+    )
 }
 
 fn row_to_advisory_forecast_signal(
