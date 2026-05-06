@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tfk_protocol::{
     AdvisoryForecastSignal, CommitRequest, ContinuationDelta, ContinuationInput,
-    ContinuationStatus, ContinuationType, RawEventInput, StoredCommitment, StoredContinuation,
-    TemporalDeltaInput,
+    ContinuationRelationEdge, ContinuationRelationKind, ContinuationStatus, ContinuationType,
+    RawEventInput, StoredCommitment, StoredContinuation, TemporalDeltaInput,
 };
 use tfk_vector::{
     NoopVectorIndex, VectorDocument, VectorDocumentKind, VectorIndex, VectorIndexStatus,
@@ -448,6 +448,65 @@ impl Store {
         Ok(continuations)
     }
 
+    pub fn create_continuation_relation(
+        &self,
+        relation: &ContinuationRelationEdge,
+    ) -> Result<ContinuationRelationEdge> {
+        let kind = continuation_relation_kind_to_string(relation.kind)?;
+        let now = now_rfc3339()?;
+        self.conn.execute(
+            "INSERT INTO continuation_relations (
+                from_id, to_id, kind, reason, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                &relation.from_id,
+                &relation.to_id,
+                kind,
+                &relation.reason,
+                now,
+            ],
+        )?;
+        Ok(relation.clone())
+    }
+
+    pub fn list_continuation_relations(&self) -> Result<Vec<ContinuationRelationEdge>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT from_id, to_id, kind, reason
+             FROM continuation_relations
+             ORDER BY created_at, from_id, to_id, kind",
+        )?;
+        let rows = stmt.query_map([], row_to_continuation_relation_fields)?;
+        collect_continuation_relations(rows)
+    }
+
+    pub fn active_continuation_relations_for_continuation_ids(
+        &self,
+        continuation_ids: &[String],
+    ) -> Result<Vec<ContinuationRelationEdge>> {
+        let mut relations = Vec::new();
+        for continuation_id in continuation_ids {
+            let mut stmt = self.conn.prepare(
+                "SELECT relation.from_id, relation.to_id, relation.kind, relation.reason
+                 FROM continuation_relations relation
+                 JOIN continuations from_continuation ON from_continuation.id = relation.from_id
+                 JOIN continuations to_continuation ON to_continuation.id = relation.to_id
+                 WHERE (relation.from_id = ?1 OR relation.to_id = ?1)
+                   AND from_continuation.status = 'active'
+                   AND to_continuation.status = 'active'
+                 ORDER BY relation.created_at, relation.from_id, relation.to_id, relation.kind",
+            )?;
+            for relation in collect_continuation_relations(stmt.query_map(
+                params![continuation_id],
+                row_to_continuation_relation_fields,
+            )?)? {
+                if !relations.contains(&relation) {
+                    relations.push(relation);
+                }
+            }
+        }
+        Ok(relations)
+    }
+
     pub fn search_raw_events(&self, query: &str) -> Result<Vec<String>> {
         if query.trim().is_empty() {
             return Ok(Vec::new());
@@ -712,6 +771,24 @@ struct CommitmentFields {
     created_at: String,
 }
 
+struct ContinuationRelationFields {
+    from_id: String,
+    to_id: String,
+    kind: String,
+    reason: Option<String>,
+}
+
+impl ContinuationRelationFields {
+    fn into_edge(self) -> Result<ContinuationRelationEdge> {
+        Ok(ContinuationRelationEdge {
+            from_id: self.from_id,
+            to_id: self.to_id,
+            kind: continuation_relation_kind_from_string(&self.kind)?,
+            reason: self.reason,
+        })
+    }
+}
+
 impl CommitmentFields {
     fn into_stored(self) -> Result<StoredCommitment> {
         Ok(StoredCommitment {
@@ -740,6 +817,28 @@ fn row_to_commitment(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommitmentFiel
         status: row.get(7)?,
         created_at: row.get(8)?,
     })
+}
+
+fn row_to_continuation_relation_fields(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ContinuationRelationFields> {
+    Ok(ContinuationRelationFields {
+        from_id: row.get(0)?,
+        to_id: row.get(1)?,
+        kind: row.get(2)?,
+        reason: row.get(3)?,
+    })
+}
+
+fn collect_continuation_relations<I>(rows: I) -> Result<Vec<ContinuationRelationEdge>>
+where
+    I: IntoIterator<Item = rusqlite::Result<ContinuationRelationFields>>,
+{
+    let mut relations = Vec::new();
+    for row in rows {
+        relations.push(row?.into_edge()?);
+    }
+    Ok(relations)
 }
 
 impl ContinuationFields {
@@ -792,6 +891,16 @@ fn continuation_status_to_string(status: ContinuationStatus) -> Result<String> {
 fn continuation_status_from_string(status: &str) -> Result<ContinuationStatus> {
     Ok(serde_json::from_value(serde_json::Value::String(
         status.to_string(),
+    ))?)
+}
+
+fn continuation_relation_kind_to_string(kind: ContinuationRelationKind) -> Result<String> {
+    Ok(serde_json::to_value(kind)?.as_str().unwrap().to_string())
+}
+
+fn continuation_relation_kind_from_string(kind: &str) -> Result<ContinuationRelationKind> {
+    Ok(serde_json::from_value(serde_json::Value::String(
+        kind.to_string(),
     ))?)
 }
 
@@ -943,6 +1052,13 @@ fn run_migrations(conn: &Connection) -> Result<()> {
           deadline TEXT,
           revocable INTEGER NOT NULL,
           status TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS continuation_relations (
+          from_id TEXT NOT NULL REFERENCES continuations(id),
+          to_id TEXT NOT NULL REFERENCES continuations(id),
+          kind TEXT NOT NULL,
+          reason TEXT,
           created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS temporal_deltas (
