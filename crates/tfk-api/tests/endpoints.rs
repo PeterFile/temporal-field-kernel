@@ -137,7 +137,10 @@ async fn forecast_endpoint_returns_ranked_candidate_actions() {
 #[tokio::test]
 async fn forecast_endpoint_appends_injected_advisory_signals() {
     let tmp = tempdir().unwrap();
-    let store = open_test_store(tmp.path());
+    let data_dir = tmp.path().join("data");
+    let db_path = data_dir.join("tfk.db");
+    let archive_dir = data_dir.join("archive");
+    let store = Store::open(&db_path, &archive_dir).unwrap();
     let client = StaticForecastClient::new(vec![AdvisoryForecastSignal {
         name: "forming_future_risk".to_string(),
         model: "static-test".to_string(),
@@ -160,6 +163,13 @@ async fn forecast_endpoint_appends_injected_advisory_signals() {
     assert_eq!(result.advisory_signals.len(), 1);
     assert_eq!(result.advisory_signals[0].name, "forming_future_risk");
     assert!(envelope.warnings.is_empty());
+
+    let reopened = Store::open(&db_path, &archive_dir).unwrap();
+    let stored = reopened.list_advisory_forecast_signals().unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].name, "forming_future_risk");
+    assert_eq!(stored[0].confidence, 0.8);
+    assert_eq!(stored[0].model, "static-test");
 }
 
 #[tokio::test]
@@ -197,6 +207,31 @@ async fn forecast_endpoint_keeps_deterministic_result_when_model_fails() {
         .warnings
         .iter()
         .any(|warning| warning.contains("forecast advisory model failed")));
+}
+
+#[tokio::test]
+async fn forecast_endpoint_without_client_does_not_store_advisory_signals() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let db_path = data_dir.join("tfk.db");
+    let archive_dir = data_dir.join("archive");
+    let store = Store::open(&db_path, &archive_dir).unwrap();
+    let app = tfk_api::router_with_store(store);
+
+    let response = app
+        .oneshot(json_request("POST", "/v1/forecast", &forecast_request()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<ForecastResult> = read_json(response).await;
+    assert!(envelope.data.unwrap().advisory_signals.is_empty());
+
+    let reopened = Store::open(&db_path, &archive_dir).unwrap();
+    assert!(reopened
+        .list_advisory_forecast_signals()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

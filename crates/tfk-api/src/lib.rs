@@ -170,6 +170,23 @@ async fn forecast_handler(
     if let Some(client) = &state.forecast_client {
         match client.forecast(&request) {
             Ok(signals) => {
+                if !signals.is_empty() {
+                    let persist_result = state
+                        .store
+                        .lock()
+                        .map_err(|_| "store lock poisoned".to_string())
+                        .and_then(|store| {
+                            store
+                                .record_advisory_forecast_signals(&signals)
+                                .map(|_| ())
+                                .map_err(|error| error.to_string())
+                        });
+                    if let Err(error) = persist_result {
+                        warnings.push(format!(
+                            "forecast advisory signals were not persisted; deterministic result returned: {error}"
+                        ));
+                    }
+                }
                 result.advisory_signals.extend(signals);
             }
             Err(error) => warnings.push(format!(
