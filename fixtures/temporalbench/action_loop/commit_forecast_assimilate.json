@@ -1,0 +1,81 @@
+{
+  "commitment": {
+    "speaker": "agent",
+    "statement": "complete reversible migration review before shipping action-loop",
+    "scope": "temporalbench/action-loop",
+    "deadline": "2026-05-06",
+    "revocable": true
+  },
+  "lens": {
+    "query": "migration review",
+    "horizon": ["next-action"],
+    "perspective": ["commitment", "action"]
+  },
+  "preflight": {
+    "uncertainty": 0.9,
+    "irreversibility": 0.9,
+    "externality": 0.8,
+    "option_value_loss": 0.7
+  },
+  "forecast": {
+    "actions": [
+      {
+        "name": "ship irreversible migration",
+        "continuation_id": null,
+        "progress": 0.9,
+        "closure": 0.4,
+        "option_value_preserved": 0.1,
+        "risk": 0.9,
+        "irreversibility": 0.9,
+        "confusion": 0.3,
+        "friction": 0.2,
+        "temporal_debt_added": 0.8,
+        "uncertainty": 0.9,
+        "externality": 0.9
+      },
+      {
+        "name": "dry-run migration plan",
+        "continuation_id": null,
+        "progress": 0.7,
+        "closure": 0.6,
+        "option_value_preserved": 0.9,
+        "risk": 0.1,
+        "irreversibility": 0.1,
+        "confusion": 0.1,
+        "friction": 0.2,
+        "temporal_debt_added": 0.0,
+        "uncertainty": 0.2,
+        "externality": 0.2
+      },
+      {
+        "name": "ask owner before acting",
+        "continuation_id": null,
+        "progress": 0.4,
+        "closure": 0.3,
+        "option_value_preserved": 0.8,
+        "risk": 0.0,
+        "irreversibility": 0.0,
+        "confusion": 0.0,
+        "friction": 0.4,
+        "temporal_debt_added": 0.0,
+        "uncertainty": 0.1,
+        "externality": 0.1
+      }
+    ],
+    "relations": []
+  },
+  "assimilation": {
+    "action_id": "dry-run migration plan",
+    "delta": "close"
+  },
+  "expected": {
+    "commitment_constraint_count": 1,
+    "active_pressure_count_before_assimilate": 1,
+    "preflight_requires_confirmation": true,
+    "forecast_top_action": "dry-run migration plan",
+    "assimilated_status": "closed",
+    "reopened_status": "closed",
+    "commitment_constraint_count_after_assimilate": 0,
+    "active_pressure_count_after_assimilate": 0
+  }
+}
