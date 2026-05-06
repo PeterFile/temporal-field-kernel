@@ -279,6 +279,51 @@ fn continuation_search_matches_title_and_summary_as_literal_text() {
 }
 
 #[test]
+fn active_continuations_for_raw_event_ids_filters_non_active_statuses() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let active = store
+        .create_continuation(&ContinuationInput {
+            title: "active linked".to_string(),
+            summary: "linked by raw event".to_string(),
+            continuation_type: ContinuationType::Narrative,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: Some("evt_source".to_string()),
+        })
+        .unwrap();
+    let closed = store
+        .create_continuation(&ContinuationInput {
+            title: "closed linked".to_string(),
+            summary: "must not be treated as active".to_string(),
+            continuation_type: ContinuationType::Narrative,
+            status: ContinuationStatus::Closed,
+            parent_id: None,
+            raw_event_id: Some("evt_source".to_string()),
+        })
+        .unwrap();
+    store
+        .create_continuation(&ContinuationInput {
+            title: "active other event".to_string(),
+            summary: "wrong raw event".to_string(),
+            continuation_type: ContinuationType::Narrative,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: Some("evt_other".to_string()),
+        })
+        .unwrap();
+
+    let linked = store
+        .active_continuations_for_raw_event_ids(&["evt_source".to_string()])
+        .unwrap();
+
+    assert_eq!(linked, vec![active]);
+    assert!(!linked
+        .iter()
+        .any(|continuation| continuation.id == closed.id));
+}
+
+#[test]
 fn opening_legacy_continuation_table_adds_narrative_default() {
     let tmp = tempdir().unwrap();
     let data_dir = tmp.path().join("data");

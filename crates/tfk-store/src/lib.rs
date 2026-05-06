@@ -427,6 +427,27 @@ impl Store {
         Ok(hits)
     }
 
+    pub fn active_continuations_for_raw_event_ids(
+        &self,
+        raw_event_ids: &[String],
+    ) -> Result<Vec<StoredContinuation>> {
+        let mut continuations = Vec::new();
+        for raw_event_id in raw_event_ids {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, title, summary, continuation_type, status, parent_id, raw_event_id, created_at, updated_at
+                 FROM continuations
+                 WHERE status = 'active'
+                   AND raw_event_id = ?1
+                 ORDER BY updated_at, id",
+            )?;
+            let rows = stmt.query_map(params![raw_event_id], row_to_continuation_fields)?;
+            for row in rows {
+                continuations.push(row?.into_stored()?);
+            }
+        }
+        Ok(continuations)
+    }
+
     pub fn search_raw_events(&self, query: &str) -> Result<Vec<String>> {
         if query.trim().is_empty() {
             return Ok(Vec::new());
