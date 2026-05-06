@@ -33,6 +33,9 @@ enum Command {
         /// Directory containing tfk.db and the append-only archive directory.
         #[arg(long)]
         data_dir: Option<PathBuf>,
+        /// Load advisory-only static forecast signals from local JSON.
+        #[arg(long)]
+        forecast_advisory_json: Option<PathBuf>,
     },
 }
 
@@ -53,27 +56,43 @@ async fn main() -> anyhow::Result<()> {
             uds,
             http,
             data_dir,
+            forecast_advisory_json,
         } => {
             let data_dir = data_dir.unwrap_or_else(default_data_dir);
             let store = open_store(&data_dir)?;
+            let state = api_state_for_store(store, forecast_advisory_json.as_deref())?;
             if let Some(http) = http {
-                serve_http(http, store).await?;
+                serve_http(http, state).await?;
             } else {
                 let socket_path = uds.unwrap_or_else(default_socket_path);
-                serve_uds(socket_path, store).await?;
+                serve_uds(socket_path, state).await?;
             }
         }
     }
     Ok(())
 }
 
-async fn serve_http(http: String, store: Store) -> anyhow::Result<()> {
+fn api_state_for_store(
+    store: Store,
+    forecast_advisory_json: Option<&Path>,
+) -> anyhow::Result<tfk_api::ApiState> {
+    let state = tfk_api::ApiState::new(store);
+    let Some(path) = forecast_advisory_json else {
+        return Ok(state);
+    };
+    let client = tfk_model_client::StaticForecastClient::from_json_file(path)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("failed to load forecast advisory JSON {}", path.display()))?;
+    Ok(state.with_forecast_client(client))
+}
+
+async fn serve_http(http: String, state: tfk_api::ApiState) -> anyhow::Result<()> {
     let addr = parse_loopback_http_addr(&http)?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind {addr}"))?;
     tracing::info!(%addr, "serving tfkd HTTP API");
-    axum::serve(listener, tfk_api::router_with_store(store)).await?;
+    axum::serve(listener, tfk_api::router_with_state(state)).await?;
     Ok(())
 }
 
@@ -87,7 +106,7 @@ fn parse_loopback_http_addr(http: &str) -> anyhow::Result<SocketAddr> {
     Ok(addr)
 }
 
-async fn serve_uds(socket_path: PathBuf, store: Store) -> anyhow::Result<()> {
+async fn serve_uds(socket_path: PathBuf, state: tfk_api::ApiState) -> anyhow::Result<()> {
     if let Some(parent) = socket_path.parent() {
         ensure_private_dir(parent)?;
     }
@@ -97,7 +116,7 @@ async fn serve_uds(socket_path: PathBuf, store: Store) -> anyhow::Result<()> {
     restrict_socket_permissions(&socket_path)?;
     tracing::info!(path = %socket_path.display(), "serving tfkd UDS API");
 
-    let app = tfk_api::router_with_store(store);
+    let app = tfk_api::router_with_state(state);
     loop {
         let (stream, _) = listener.accept().await?;
         let app = app.clone();
@@ -321,6 +340,21 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn serve_parses_static_forecast_advisory_json_flag() {
+        let cli = Cli::parse_from(["tfkd", "serve", "--forecast-advisory-json", "forecast.json"]);
+
+        let Command::Serve {
+            forecast_advisory_json,
+            ..
+        } = cli.command
+        else {
+            panic!("expected serve command");
+        };
+
+        assert_eq!(forecast_advisory_json, Some(PathBuf::from("forecast.json")));
     }
 
     fn bind_test_socket_or_skip(path: &Path) -> Option<StdUnixListener> {

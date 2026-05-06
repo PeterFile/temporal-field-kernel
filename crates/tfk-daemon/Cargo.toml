@@ -16,6 +16,7 @@ clap.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 tfk-api = { path = "../tfk-api" }
+tfk-model-client = { path = "../tfk-model-client" }
 tfk-store = { path = "../tfk-store" }
 tokio.workspace = true
 tower.workspace = true

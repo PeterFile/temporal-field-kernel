@@ -102,6 +102,12 @@ Smoke:
 tfk preflight --uncertainty 0.9 --irreversibility 0.8 --externality 0.7
 ```
 
+### POST /v1/forecast
+
+Accepts `ForecastRequest` and returns deterministic ranked actions. By default, `advisory_signals` is empty.
+
+`tfkd serve --forecast-advisory-json <path>` opt-in loads local static advisory signals and appends them to the deterministic forecast response. The file may be either a bare `AdvisoryForecastSignal[]` array or an object containing `advisory_signals`; fixture metadata such as `request` and `expected_*` is ignored.
+
 ### POST /v1/lens
 
 Accepts `LensRequest`:

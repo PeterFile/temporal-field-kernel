@@ -1066,6 +1066,7 @@ dependencies = [
  "hyper-util",
  "tempfile",
  "tfk-api",
+ "tfk-model-client",
  "tfk-store",
  "tokio",
  "tower",
