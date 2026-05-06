@@ -1,5 +1,7 @@
 use serde_json::json;
-use tfk_mcp::{daemon_request_for, degraded_response, parse_command_line, StdioCommand};
+use tfk_mcp::{
+    daemon_request_for, degraded_response, dispatch_to_daemon, parse_command_line, StdioCommand,
+};
 
 #[test]
 fn parses_health_json_line_command() {
@@ -48,6 +50,88 @@ fn preflight_command_defaults_option_value_loss() {
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
 
     assert_eq!(body["option_value_loss"], 0.0);
+}
+
+#[test]
+fn forecast_command_maps_to_daemon_forecast_request() {
+    let request_json = json!({
+        "actions": [{
+            "name": "verify first",
+            "continuation_id": "cont_verify",
+            "progress": 0.7,
+            "closure": 0.5,
+            "option_value_preserved": 0.8,
+            "risk": 0.1,
+            "irreversibility": 0.1,
+            "confusion": 0.1,
+            "friction": 0.2,
+            "temporal_debt_added": 0.0,
+            "uncertainty": 0.2,
+            "externality": 0.3
+        }],
+        "relations": []
+    });
+    let command = parse_command_line(
+        &json!({
+            "command": "forecast",
+            "request": request_json,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let request = daemon_request_for(&command).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/v1/forecast");
+    assert_eq!(body["actions"][0]["name"], "verify first");
+    assert_eq!(body["actions"][0]["option_value_preserved"], 0.8);
+}
+
+#[test]
+fn commit_command_maps_to_daemon_commit_request() {
+    let command = parse_command_line(
+        r#"{"command":"commit","request":{"speaker":"agent","statement":"I will send the draft","scope":"current_project","deadline":"2026-05-02","revocable":true}}"#,
+    )
+    .unwrap();
+    let request = daemon_request_for(&command).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/v1/commit");
+    assert_eq!(body["speaker"], "agent");
+    assert_eq!(body["statement"], "I will send the draft");
+    assert_eq!(body["revocable"], true);
+}
+
+#[test]
+fn assimilate_command_maps_to_daemon_assimilate_request() {
+    let command = parse_command_line(
+        r#"{"command":"assimilate","request":{"action_id":"a42","changes":[{"continuation_id":"cont_verify","delta":"close"}],"claims_made":[],"evidence":[]}}"#,
+    )
+    .unwrap();
+    let request = daemon_request_for(&command).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/v1/assimilate");
+    assert_eq!(body["action_id"], "a42");
+    assert_eq!(body["changes"][0]["continuation_id"], "cont_verify");
+    assert_eq!(body["changes"][0]["delta"], "close");
+}
+
+#[tokio::test]
+async fn malformed_action_loop_request_returns_command_error_without_daemon() {
+    let command =
+        parse_command_line(r#"{"command":"forecast","request":{"actions":[{"name":"bad"}]}}"#)
+            .unwrap();
+    let response =
+        dispatch_to_daemon(std::path::Path::new("/tmp/tfk-missing.sock"), &command).await;
+
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["command"], "forecast");
+    assert_eq!(response["degraded"], false);
+    assert!(response["error"].as_str().unwrap().contains("request"));
 }
 
 #[test]

@@ -7,9 +7,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
-use tfk_protocol::{LensRequest, PreflightSignals};
+use tfk_protocol::{
+    CommitRequest, ForecastRequest, LensRequest, PreflightSignals, TemporalDeltaInput,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -27,6 +29,15 @@ pub enum StdioCommand {
         #[serde(default)]
         option_value_loss: Option<f64>,
     },
+    Forecast {
+        request: Value,
+    },
+    Commit {
+        request: Value,
+    },
+    Assimilate {
+        request: Value,
+    },
 }
 
 impl StdioCommand {
@@ -35,6 +46,9 @@ impl StdioCommand {
             Self::Health => "health",
             Self::Lens { .. } => "lens",
             Self::Preflight { .. } => "preflight",
+            Self::Forecast { .. } => "forecast",
+            Self::Commit { .. } => "commit",
+            Self::Assimilate { .. } => "assimilate",
         }
     }
 }
@@ -97,7 +111,31 @@ pub fn daemon_request_for(command: &StdioCommand) -> anyhow::Result<DaemonReques
                 body: serde_json::to_vec(&request)?,
             })
         }
+        StdioCommand::Forecast { request } => Ok(DaemonRequest {
+            method: "POST",
+            path: "/v1/forecast",
+            body: typed_request_body::<ForecastRequest>(request, "forecast")?,
+        }),
+        StdioCommand::Commit { request } => Ok(DaemonRequest {
+            method: "POST",
+            path: "/v1/commit",
+            body: typed_request_body::<CommitRequest>(request, "commit")?,
+        }),
+        StdioCommand::Assimilate { request } => Ok(DaemonRequest {
+            method: "POST",
+            path: "/v1/assimilate",
+            body: typed_request_body::<TemporalDeltaInput>(request, "assimilate")?,
+        }),
     }
+}
+
+fn typed_request_body<T>(request: &Value, command: &str) -> anyhow::Result<Vec<u8>>
+where
+    T: DeserializeOwned + Serialize,
+{
+    let typed = serde_json::from_value::<T>(request.clone())
+        .with_context(|| format!("{command} request did not match protocol schema"))?;
+    serde_json::to_vec(&typed).context("failed to serialize daemon request")
 }
 
 pub async fn dispatch_to_daemon(socket_path: &Path, command: &StdioCommand) -> Value {
