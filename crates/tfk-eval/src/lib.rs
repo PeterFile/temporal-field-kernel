@@ -4,10 +4,11 @@ use std::path::Path;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use tfk_core::ForecastScorer;
+use tfk_core::{ForecastScorer, PreflightScorer, TimeFieldContinuation, TimeFieldLensEngine};
 use tfk_protocol::{
-    AdvisoryForecastSignal, EventModality, EventSource, EvidenceStatus, ForecastRequest,
-    RawEventInput,
+    AdvisoryForecastSignal, CommitRequest, ContinuationDelta, ContinuationStatus,
+    ContinuationStatusDelta, ContinuationType, EventModality, EventSource, EvidenceStatus,
+    ForecastRequest, LensCard, LensRequest, PreflightSignals, RawEventInput, TemporalDeltaInput,
 };
 use tfk_store::Store;
 
@@ -26,6 +27,21 @@ pub struct ForecastReplaySummary {
     pub expected_top_action: String,
     pub advisory_signal_count: usize,
     pub advisory_signal_names: Vec<String>,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionLoopReplaySummary {
+    pub fixture_path: String,
+    pub commitment_constraint_count: usize,
+    pub active_pressure_count_before_assimilate: usize,
+    pub preflight_requires_confirmation: bool,
+    pub forecast_top_action: String,
+    pub assimilation_action_matches_forecast: bool,
+    pub assimilated_status: String,
+    pub reopened_status: String,
+    pub commitment_constraint_count_after_assimilate: usize,
+    pub active_pressure_count_after_assimilate: usize,
     pub ok: bool,
 }
 
@@ -129,6 +145,96 @@ pub fn replay_forecast_fixture(path: &Path) -> anyhow::Result<ForecastReplaySumm
     })
 }
 
+pub fn replay_action_loop_fixture(path: &Path) -> anyhow::Result<ActionLoopReplaySummary> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
+    let fixture: ActionLoopFixture = serde_json::from_reader(file)
+        .with_context(|| format!("invalid fixture {}", path.display()))?;
+    let tmp = tempfile::tempdir().context("failed to create action-loop temp directory")?;
+    let data_dir = tmp.path().join("store");
+    let db_path = data_dir.join("tfk.db");
+    let archive_dir = data_dir.join("archive");
+    let mut store =
+        Store::open(&db_path, &archive_dir).context("failed to open action-loop store")?;
+
+    let continuation = store
+        .create_continuation(&continuation_input_from_commitment(&fixture.commitment))
+        .context("failed to create action-loop continuation")?;
+    let _commitment = store
+        .create_commitment(&fixture.commitment, &continuation.id)
+        .context("failed to create action-loop commitment")?;
+
+    let before =
+        lens_from_store(&store, &fixture.lens).context("failed to run pre-assimilate lens")?;
+    let preflight =
+        PreflightScorer::with_threshold(fixture.preflight_threshold).score(fixture.preflight);
+    let forecast = ForecastScorer.score(&fixture.forecast);
+    let forecast_top_action = forecast
+        .ranked_actions
+        .first()
+        .map(|action| action.name.clone())
+        .unwrap_or_default();
+    let assimilation_action_matches_forecast =
+        fixture.assimilation.action_id == forecast_top_action;
+
+    store
+        .assimilate_delta(&TemporalDeltaInput {
+            action_id: fixture.assimilation.action_id,
+            changes: vec![ContinuationStatusDelta {
+                continuation_id: continuation.id.clone(),
+                delta: fixture.assimilation.delta,
+            }],
+            claims_made: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .context("failed to assimilate action-loop delta")?;
+    let assimilated_status = store
+        .get_continuation(&continuation.id)
+        .context("failed to read assimilated continuation")?
+        .map(|stored| status_name(stored.status).to_string())
+        .unwrap_or_default();
+
+    drop(store);
+    let reopened =
+        Store::open(&db_path, &archive_dir).context("failed to reopen action-loop store")?;
+    let reopened_status = reopened
+        .get_continuation(&continuation.id)
+        .context("failed to read reopened continuation")?
+        .map(|stored| status_name(stored.status).to_string())
+        .unwrap_or_default();
+    let after =
+        lens_from_store(&reopened, &fixture.lens).context("failed to run post-assimilate lens")?;
+
+    let ok = before.commitment_constraints.len() == fixture.expected.commitment_constraint_count
+        && before.active_continuations.len()
+            == fixture.expected.active_pressure_count_before_assimilate
+        && preflight.requires_confirmation == fixture.expected.preflight_requires_confirmation
+        && forecast_top_action == fixture.expected.forecast_top_action
+        && assimilation_action_matches_forecast
+        && assimilated_status == fixture.expected.assimilated_status
+        && reopened_status == fixture.expected.reopened_status
+        && after.commitment_constraints.len()
+            == fixture
+                .expected
+                .commitment_constraint_count_after_assimilate
+        && after.active_continuations.len()
+            == fixture.expected.active_pressure_count_after_assimilate;
+
+    Ok(ActionLoopReplaySummary {
+        fixture_path: path.to_string_lossy().to_string(),
+        commitment_constraint_count: before.commitment_constraints.len(),
+        active_pressure_count_before_assimilate: before.active_continuations.len(),
+        preflight_requires_confirmation: preflight.requires_confirmation,
+        forecast_top_action,
+        assimilation_action_matches_forecast,
+        assimilated_status,
+        reopened_status,
+        commitment_constraint_count_after_assimilate: after.commitment_constraints.len(),
+        active_pressure_count_after_assimilate: after.active_continuations.len(),
+        ok,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct ForecastFixture {
     request: ForecastRequest,
@@ -139,6 +245,36 @@ struct ForecastFixture {
     expected_advisory_signal_count: Option<usize>,
     #[serde(default)]
     expected_advisory_signal_names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActionLoopFixture {
+    commitment: CommitRequest,
+    lens: LensRequest,
+    preflight: PreflightSignals,
+    #[serde(default = "default_preflight_threshold")]
+    preflight_threshold: f64,
+    forecast: ForecastRequest,
+    assimilation: ActionLoopAssimilation,
+    expected: ActionLoopExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActionLoopAssimilation {
+    action_id: String,
+    delta: ContinuationDelta,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActionLoopExpected {
+    commitment_constraint_count: usize,
+    active_pressure_count_before_assimilate: usize,
+    preflight_requires_confirmation: bool,
+    forecast_top_action: String,
+    assimilated_status: String,
+    reopened_status: String,
+    commitment_constraint_count_after_assimilate: usize,
+    active_pressure_count_after_assimilate: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,6 +308,72 @@ impl From<FixtureEventRecord> for RawEventInput {
             time_utc: record.time_utc,
         }
     }
+}
+
+fn lens_from_store(store: &Store, request: &LensRequest) -> anyhow::Result<LensCard> {
+    let continuation_ids = store
+        .search_continuations(&request.query)
+        .context("failed to search continuations")?;
+    let mut continuations = Vec::new();
+    for id in &continuation_ids {
+        if let Some(continuation) = store
+            .get_continuation(id)
+            .context("failed to load continuation search hit")?
+        {
+            continuations.push(continuation);
+        }
+    }
+
+    let commitment_constraints = store
+        .active_commitments_for_continuations(&continuation_ids)
+        .context("failed to load active commitment constraints")?;
+    let time_field_continuations: Vec<_> = continuations
+        .into_iter()
+        .map(|continuation| TimeFieldContinuation {
+            id: continuation.id,
+            title: continuation.title,
+            summary: continuation.summary,
+            continuation_type: continuation.continuation_type,
+            status: continuation.status,
+        })
+        .collect();
+    let mut card = TimeFieldLensEngine.generate(request, &time_field_continuations, 0);
+    card.commitment_constraints = commitment_constraints;
+    Ok(card)
+}
+
+fn continuation_input_from_commitment(
+    commitment: &CommitRequest,
+) -> tfk_protocol::ContinuationInput {
+    tfk_protocol::ContinuationInput {
+        title: commitment.statement.clone(),
+        summary: format!(
+            "speaker={}; statement={}; scope={}; deadline={}; revocable={}",
+            commitment.speaker,
+            commitment.statement,
+            commitment.scope.as_deref().unwrap_or("unspecified"),
+            commitment.deadline.as_deref().unwrap_or("unspecified"),
+            commitment.revocable
+        ),
+        continuation_type: ContinuationType::Obligation,
+        status: ContinuationStatus::Active,
+        parent_id: None,
+        raw_event_id: None,
+    }
+}
+
+fn status_name(status: ContinuationStatus) -> &'static str {
+    match status {
+        ContinuationStatus::Active => "active",
+        ContinuationStatus::Stabilized => "stabilized",
+        ContinuationStatus::Deferred => "deferred",
+        ContinuationStatus::Closed => "closed",
+        ContinuationStatus::Retired => "retired",
+    }
+}
+
+fn default_preflight_threshold() -> f64 {
+    0.5
 }
 
 fn default_session_id() -> String {
