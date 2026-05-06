@@ -1,0 +1,47 @@
+{
+  "continuations": [
+    {
+      "label": "prereq",
+      "input": {
+        "title": "relation boundary prereq",
+        "summary": "relation boundary shared work needs the prerequisite closed first",
+        "continuation_type": "obligation",
+        "status": "active"
+      }
+    },
+    {
+      "label": "blocked",
+      "input": {
+        "title": "relation boundary blocked",
+        "summary": "relation boundary shared work is blocked until prerequisite closes",
+        "continuation_type": "obligation",
+        "status": "active"
+      }
+    }
+  ],
+  "relation": {
+    "from": "prereq",
+    "to": "blocked",
+    "kind": "blocks",
+    "reason": "blocked work must wait for prerequisite closure"
+  },
+  "lens": {
+    "query": "relation boundary",
+    "horizon": ["next-action"],
+    "perspective": ["action"]
+  },
+  "assimilation": {
+    "target": "prereq",
+    "action_id": "close prerequisite",
+    "delta": "close"
+  },
+  "expected": {
+    "before_stance": "verify",
+    "before_boundary_kinds": ["relation_block"],
+    "before_active_continuation_count": 2,
+    "assimilated_status": "closed",
+    "after_boundary_kinds": [],
+    "after_active_continuation_count": 1,
+    "after_stance": "act"
+  }
+}
