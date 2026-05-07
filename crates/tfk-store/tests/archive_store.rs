@@ -626,6 +626,40 @@ fn advisory_forecast_signals_are_recorded_and_listed() {
 }
 
 #[test]
+fn advisory_forecast_signal_search_matches_literal_fields() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let stored = store
+        .record_advisory_forecast_signals(&[
+            AdvisoryForecastSignal {
+                name: "rollback evidence needed".to_string(),
+                model: "static-test".to_string(),
+                confidence: 0.91,
+                action_name: Some("verify rollback evidence".to_string()),
+                reason: Some("release gate says 100%_literal rollback evidence".to_string()),
+            },
+            AdvisoryForecastSignal {
+                name: "unrelated calendar pressure".to_string(),
+                model: "100%_literal model only".to_string(),
+                confidence: 0.42,
+                action_name: Some("schedule review".to_string()),
+                reason: Some("does not mention the release gate".to_string()),
+            },
+        ])
+        .unwrap();
+
+    let hits = store
+        .search_advisory_forecast_signals("100%_literal")
+        .unwrap();
+
+    assert_eq!(hits, vec![stored[0].clone()]);
+    assert!(store
+        .search_advisory_forecast_signals("   ")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn commitment_create_reopen_and_active_filtering_uses_linked_continuation_status() {
     let tmp = tempdir().unwrap();
     let data_dir = tmp.path().join("data");

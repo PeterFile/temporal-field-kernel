@@ -175,6 +175,19 @@ pub struct LensRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LensAdvisoryForecastSignal {
+    pub id: String,
+    pub name: String,
+    pub confidence: f64,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LensCard {
     pub stance: String,
     pub why_now: String,
@@ -182,6 +195,8 @@ pub struct LensCard {
     pub active_continuations: Vec<LensActiveContinuation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commitment_constraints: Vec<StoredCommitment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisory_forecast_signals: Vec<LensAdvisoryForecastSignal>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boundaries: Vec<LensBoundary>,
     pub avoid: Vec<String>,
