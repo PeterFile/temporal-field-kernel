@@ -676,6 +676,32 @@ impl Store {
         Ok(Some(row_to_advisory_forecast_signal(row)?))
     }
 
+    pub fn search_advisory_forecast_signals(
+        &self,
+        query: &str,
+    ) -> Result<Vec<StoredAdvisoryForecastSignal>> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let pattern = like_literal_pattern(query);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, confidence, model, action_name, reason, created_at
+             FROM advisory_forecast_signals
+             WHERE name LIKE ?1 ESCAPE '\\'
+                OR action_name LIKE ?1 ESCAPE '\\'
+                OR reason LIKE ?1 ESCAPE '\\'
+             ORDER BY created_at, id
+             LIMIT 20",
+        )?;
+        let rows = stmt.query_map(params![pattern], row_to_advisory_forecast_signal)?;
+        let mut signals = Vec::new();
+        for row in rows {
+            signals.push(row?);
+        }
+        Ok(signals)
+    }
+
     fn search_raw_events_fts(&self, query: &str) -> Result<Vec<String>> {
         let fts_query = fts_literal_query(query);
         let pattern = like_literal_pattern(query);

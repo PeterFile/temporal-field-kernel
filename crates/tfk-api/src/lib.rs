@@ -11,9 +11,9 @@ use tfk_core::{ForecastScorer, PreflightScorer, TimeFieldContinuation, TimeField
 use tfk_model_client::ForecastPredictionClient;
 use tfk_protocol::{
     ApiEnvelope, CommitRequest, ContinuationInput, ContinuationRelationEdge, ContinuationStatus,
-    ContinuationType, ForecastRequest, ForecastResult, LensCard, LensRequest, PreflightResult,
-    PreflightSignals, ProvenanceRef, RawEventInput, StoredCommitment, StoredContinuation,
-    TemporalDeltaInput,
+    ContinuationType, ForecastRequest, ForecastResult, LensAdvisoryForecastSignal, LensCard,
+    LensRequest, PreflightResult, PreflightSignals, ProvenanceRef, RawEventInput, StoredCommitment,
+    StoredContinuation, TemporalDeltaInput,
 };
 use tfk_store::{
     Store, StoreError, StoredAdvisoryForecastSignal, StoredRawEvent, StoredTemporalDelta,
@@ -390,11 +390,21 @@ async fn lens_handler(
     State(state): State<ApiState>,
     Json(request): Json<LensRequest>,
 ) -> Result<Json<ApiEnvelope<LensCard>>, ApiError> {
-    let (continuations, events, commitment_constraints, relations, promoted_raw_event_ids) = {
+    let (
+        continuations,
+        events,
+        commitment_constraints,
+        relations,
+        promoted_raw_event_ids,
+        advisory_signals,
+    ) = {
         let store = state
             .store
             .lock()
             .map_err(|_| internal_error("store lock poisoned"))?;
+        let advisory_signals = store
+            .search_advisory_forecast_signals(&request.query)
+            .map_err(|error| internal_error(error.to_string()))?;
         let continuation_hits = store
             .search_continuations(&request.query)
             .map_err(|error| internal_error(error.to_string()))?;
@@ -450,6 +460,7 @@ async fn lens_handler(
                 commitment_constraints,
                 relations,
                 Vec::new(),
+                advisory_signals,
             )
         } else {
             let hits = store
@@ -468,7 +479,14 @@ async fn lens_handler(
                         events.push(event);
                     }
                 }
-                (continuations, events, Vec::new(), Vec::new(), Vec::new())
+                (
+                    continuations,
+                    events,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    advisory_signals,
+                )
             } else {
                 let continuation_ids: Vec<_> = linked_continuations
                     .iter()
@@ -486,6 +504,7 @@ async fn lens_handler(
                     commitment_constraints,
                     relations,
                     hits,
+                    advisory_signals,
                 )
             }
         }
@@ -540,6 +559,19 @@ async fn lens_handler(
         card.avoid
             .push("do not violate explicit commitment constraints".to_string());
     }
+    let advisory_forecast_signals: Vec<_> = advisory_signals
+        .iter()
+        .map(lens_advisory_forecast_signal)
+        .collect();
+    let advisory_signal_provenance: Vec<_> = advisory_signals
+        .iter()
+        .map(|signal| ProvenanceRef {
+            kind: "advisory_forecast_signal".to_string(),
+            id: signal.id.clone(),
+        })
+        .collect();
+    card.advisory_forecast_signals = advisory_forecast_signals;
+
     let mut envelope = ApiEnvelope::ok("local-lens", "local-lens", card);
     let mut provenance: Vec<ProvenanceRef> = if continuations.is_empty() {
         events
@@ -559,9 +591,24 @@ async fn lens_handler(
             .collect()
     };
     provenance.extend(commitment_provenance);
+    provenance.extend(advisory_signal_provenance);
     envelope.provenance = provenance;
 
     Ok(Json(envelope))
+}
+
+fn lens_advisory_forecast_signal(
+    signal: &StoredAdvisoryForecastSignal,
+) -> LensAdvisoryForecastSignal {
+    LensAdvisoryForecastSignal {
+        id: signal.id.clone(),
+        name: signal.name.clone(),
+        confidence: signal.confidence,
+        model: signal.model.clone(),
+        action_name: signal.action_name.clone(),
+        reason: signal.reason.clone(),
+        created_at: signal.created_at.clone(),
+    }
 }
 
 fn lens_card(request: &LensRequest, continuation_count: usize, raw_event_count: usize) -> LensCard {
@@ -574,6 +621,7 @@ fn lens_card(request: &LensRequest, continuation_count: usize, raw_event_count: 
             ),
             active_continuations: Vec::new(),
             commitment_constraints: Vec::new(),
+            advisory_forecast_signals: Vec::new(),
             boundaries: Vec::new(),
             avoid: vec![
                 "do not infer closure from recall alone".to_string(),
@@ -591,6 +639,7 @@ fn lens_card(request: &LensRequest, continuation_count: usize, raw_event_count: 
             why_now: format!("no matching raw events found for query: {}", request.query),
             active_continuations: Vec::new(),
             commitment_constraints: Vec::new(),
+            advisory_forecast_signals: Vec::new(),
             boundaries: Vec::new(),
             avoid: vec![
                 "do not invent continuity without stored evidence".to_string(),
@@ -610,6 +659,7 @@ fn lens_card(request: &LensRequest, continuation_count: usize, raw_event_count: 
         ),
         active_continuations: Vec::new(),
         commitment_constraints: Vec::new(),
+        advisory_forecast_signals: Vec::new(),
         boundaries: Vec::new(),
         avoid: vec![
             "do not infer closure from raw recall alone".to_string(),

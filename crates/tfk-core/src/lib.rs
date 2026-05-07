@@ -57,6 +57,7 @@ impl TimeFieldLensEngine {
                 ),
                 active_continuations: active,
                 commitment_constraints: Vec::new(),
+                advisory_forecast_signals: Vec::new(),
                 boundaries: relation_boundaries,
                 avoid: vec![
                     "do not collapse related continuations into one goal".to_string(),
@@ -79,6 +80,7 @@ impl TimeFieldLensEngine {
                 ),
                 active_continuations: active,
                 commitment_constraints: Vec::new(),
+                advisory_forecast_signals: Vec::new(),
                 boundaries: vec![LensBoundary {
                     kind: "temporal_conflict".to_string(),
                     status: "needs_resolution".to_string(),
@@ -224,6 +226,7 @@ fn action_card(
         ),
         boundaries: Vec::new(),
         commitment_constraints: Vec::new(),
+        advisory_forecast_signals: Vec::new(),
         avoid: vec![
             "do not ignore active obligation pressure".to_string(),
             "do not turn the lens into memoir or raw recall".to_string(),
@@ -257,6 +260,7 @@ fn verification_card(
             reason: Some(primary.risk_if_ignored.clone()),
         }],
         commitment_constraints: Vec::new(),
+        advisory_forecast_signals: Vec::new(),
         avoid: vec![
             "do not act as if unresolved risk is closed".to_string(),
             "do not promote unverified claims into commitments".to_string(),
@@ -286,6 +290,7 @@ fn repair_card(
         ),
         boundaries: Vec::new(),
         commitment_constraints: Vec::new(),
+        advisory_forecast_signals: Vec::new(),
         avoid: vec!["do not optimize progress while relationship damage is unresolved".to_string()],
         preferred_action: Some(LensPreferredAction {
             name: format!("repair {}", primary.id),
@@ -312,6 +317,7 @@ fn continuation_recall_card(
         ),
         boundaries: Vec::new(),
         commitment_constraints: Vec::new(),
+        advisory_forecast_signals: Vec::new(),
         avoid: vec![
             "do not infer closure from recall alone".to_string(),
             "do not expand this into vector search or full Datalog".to_string(),
@@ -337,6 +343,7 @@ fn raw_or_empty_card(request: &LensRequest, raw_event_count: usize) -> LensCard 
             ),
             active_continuations: Vec::new(),
             commitment_constraints: Vec::new(),
+            advisory_forecast_signals: Vec::new(),
             boundaries: Vec::new(),
             avoid: vec!["do not invent action pressure without an active continuation".to_string()],
             preferred_action: None,
@@ -352,6 +359,7 @@ fn raw_or_empty_card(request: &LensRequest, raw_event_count: usize) -> LensCard 
             ),
             active_continuations: Vec::new(),
             commitment_constraints: Vec::new(),
+            advisory_forecast_signals: Vec::new(),
             boundaries: Vec::new(),
             avoid: vec![
                 "do not infer closure from raw recall alone".to_string(),
