@@ -928,6 +928,23 @@ async fn commit_endpoint_persists_retrievable_structured_active_commitment() {
         .await
         .unwrap();
     let lens_envelope: ApiEnvelope<LensCard> = read_json(lens_response).await;
+    let expected_commitment_provenance = tfk_protocol::ProvenanceRef {
+        kind: "commitment".to_string(),
+        id: commitment.id.clone(),
+    };
+    assert!(lens_envelope
+        .provenance
+        .contains(&expected_commitment_provenance));
+    assert_eq!(
+        lens_envelope
+            .provenance
+            .iter()
+            .filter(|provenance| {
+                provenance.kind == "commitment" && provenance.id.as_str() == commitment.id.as_str()
+            })
+            .count(),
+        1
+    );
     let card = lens_envelope.data.unwrap();
     assert_eq!(card.commitment_constraints, commitments);
     assert!(card
@@ -948,6 +965,13 @@ async fn commit_endpoint_persists_retrievable_structured_active_commitment() {
         .await
         .unwrap();
     let unrelated_envelope: ApiEnvelope<LensCard> = read_json(unrelated_response).await;
+    assert!(!unrelated_envelope
+        .provenance
+        .contains(&expected_commitment_provenance));
+    assert!(!unrelated_envelope
+        .provenance
+        .iter()
+        .any(|provenance| provenance.kind == "commitment"));
     assert!(unrelated_envelope
         .data
         .unwrap()

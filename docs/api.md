@@ -157,7 +157,7 @@ Accepts `LensRequest`:
 }
 ```
 
-Current behavior is intentionally minimal: search continuation title/summary and active commitments first, then return a temporal `LensCard` grounded by matching `continuation` provenance. Matching active commitments are surfaced as `commitment_constraints`. If no continuation or active commitment matches, it falls back to raw events with `raw_event` provenance. This is a lens over living pasts, not a generic memory recall API.
+Current behavior is intentionally minimal: search continuation title/summary and active commitments first, then return a temporal `LensCard` grounded by matching `continuation` provenance. Matching active commitments are surfaced as `commitment_constraints`, and the response envelope includes deduplicated `commitment` provenance entries for those returned constraints. If no continuation or active commitment matches, it falls back to raw events with `raw_event` provenance. This is a lens over living pasts, not a generic memory recall API.
 
 ### POST /v1/commit
 
