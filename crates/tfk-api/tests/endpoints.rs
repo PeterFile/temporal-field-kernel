@@ -3,7 +3,9 @@ use axum::{
     http::{Request, StatusCode},
 };
 use tempfile::tempdir;
-use tfk_model_client::{ForecastPredictionClient, ModelClientError, StaticForecastClient};
+use tfk_model_client::{
+    ForecastPredictionClient, ForecastPredictionStatus, ModelClientError, StaticForecastClient,
+};
 use tfk_protocol::{
     AdvisoryForecastSignal, ApiEnvelope, CandidateAction, CommitRequest, ContinuationDelta,
     ContinuationInput, ContinuationRelationEdge, ContinuationRelationKind, ContinuationStatus,
@@ -292,6 +294,57 @@ async fn forecast_endpoint_keeps_deterministic_result_when_model_fails() {
     assert_eq!(result.ranked_actions[0].name, "verify then ship");
     assert!(result.advisory_signals.is_empty());
     assert!(envelope
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("forecast advisory model failed")));
+}
+
+#[tokio::test]
+async fn forecast_endpoint_warns_when_advisory_model_degraded() {
+    struct DegradedClient;
+
+    impl ForecastPredictionClient for DegradedClient {
+        fn forecast(
+            &self,
+            _request: &ForecastRequest,
+        ) -> Result<Vec<AdvisoryForecastSignal>, ModelClientError> {
+            Ok(Vec::new())
+        }
+
+        fn forecast_with_status(
+            &self,
+            _request: &ForecastRequest,
+        ) -> Result<ForecastPredictionStatus, ModelClientError> {
+            Ok(ForecastPredictionStatus {
+                advisory_signals: Vec::new(),
+                degraded: true,
+                reason: Some("model unavailable".to_string()),
+            })
+        }
+    }
+
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_state(
+        tfk_api::ApiState::new(store).with_forecast_client(DegradedClient),
+    );
+
+    let response = app
+        .oneshot(json_request("POST", "/v1/forecast", &forecast_request()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<ForecastResult> = read_json(response).await;
+    assert!(envelope.ok);
+    let result = envelope.data.unwrap();
+    assert_eq!(result.ranked_actions[0].name, "verify then ship");
+    assert!(result.advisory_signals.is_empty());
+    assert!(envelope.warnings.iter().any(|warning| {
+        warning.contains("forecast advisory model degraded")
+            && warning.contains("model unavailable")
+    }));
+    assert!(!envelope
         .warnings
         .iter()
         .any(|warning| warning.contains("forecast advisory model failed")));

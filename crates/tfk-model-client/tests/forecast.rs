@@ -214,6 +214,53 @@ print(json.dumps({
 }
 
 #[test]
+fn stdio_forecast_client_parses_degraded_status_without_failing() {
+    let script = write_python_script(
+        r#"
+import json
+import sys
+
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "degraded": True,
+    "reason": "model unavailable",
+    "advisory_signals": []
+}))
+"#,
+    );
+    let client = StdioForecastClient::new(python_program(), [script.as_os_str()]);
+
+    let status = client.forecast_with_status(&empty_request()).unwrap();
+
+    assert!(status.advisory_signals.is_empty());
+    assert!(status.degraded);
+    assert_eq!(status.reason.as_deref(), Some("model unavailable"));
+}
+
+#[test]
+fn stdio_forecast_client_defaults_missing_degraded_to_false() {
+    let script = write_python_script(
+        r#"
+import json
+import sys
+
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "advisory_signals": [],
+    "extra_field": "ignored"
+}))
+"#,
+    );
+    let client = StdioForecastClient::new(python_program(), [script.as_os_str()]);
+
+    let status = client.forecast_with_status(&empty_request()).unwrap();
+
+    assert!(status.advisory_signals.is_empty());
+    assert!(!status.degraded);
+    assert_eq!(status.reason, None);
+}
+
+#[test]
 fn stdio_forecast_client_rejects_nonzero_child_exit() {
     let script = write_python_script(
         r#"
