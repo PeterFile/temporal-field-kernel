@@ -3,9 +3,10 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use tfk_eval::{
-    load_fixture_events, replay_action_loop_fixture, replay_fixture, replay_forecast_fixture,
-    replay_lens_advisory_signal_fixture, replay_lens_linked_raw_event_fixture,
-    replay_relation_boundary_fixture, replay_relation_ranking_fixture,
+    load_fixture_events, replay_action_loop_fixture, replay_commitment_forecast_fixture,
+    replay_fixture, replay_forecast_fixture, replay_lens_advisory_signal_fixture,
+    replay_lens_linked_raw_event_fixture, replay_relation_boundary_fixture,
+    replay_relation_ranking_fixture,
 };
 use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{AdvisoryForecastSignal, EventSource, EvidenceStatus, ForecastRequest};
@@ -53,6 +54,11 @@ fn relation_boundary_fixture_path() -> PathBuf {
 fn relation_ranking_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/temporalbench/relation_ranking/basic.json")
+}
+
+fn commitment_forecast_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/forecast_commitment/basic.json")
 }
 
 #[test]
@@ -233,6 +239,46 @@ fn forecast_replay_cli_prints_structured_json_summary() {
     assert_eq!(value["expected_top_action"], "verify then ship");
     assert_eq!(value["advisory_signal_count"], 1);
     assert_eq!(value["advisory_signal_names"][0], "forming_future_risk");
+    assert_eq!(value["ok"], true);
+}
+
+#[test]
+fn commitment_forecast_fixture_replay_scores_against_active_commitment() {
+    let summary = replay_commitment_forecast_fixture(&commitment_forecast_fixture_path()).unwrap();
+
+    assert_eq!(summary.commitment_constraint_count, 1);
+    assert_eq!(summary.commitment_bound_action_count, 2);
+    assert_eq!(summary.expected_top_action, "verify rollback evidence");
+    assert_eq!(summary.actual_top_action, "verify rollback evidence");
+    assert_eq!(summary.constrained_action, "ship irreversible release");
+    assert!(summary.constrained_action_requires_confirmation);
+    assert!(summary.ok);
+}
+
+#[test]
+fn commitment_forecast_cli_prints_structured_json_summary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tfk-eval"))
+        .args([
+            "commitment-forecast",
+            "--fixture",
+            commitment_forecast_fixture_path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["commitment_constraint_count"], 1);
+    assert_eq!(value["commitment_bound_action_count"], 2);
+    assert_eq!(value["expected_top_action"], "verify rollback evidence");
+    assert_eq!(value["actual_top_action"], "verify rollback evidence");
+    assert_eq!(value["constrained_action"], "ship irreversible release");
+    assert_eq!(value["constrained_action_requires_confirmation"], true);
     assert_eq!(value["ok"], true);
 }
 

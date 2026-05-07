@@ -100,6 +100,18 @@ pub struct LensAdvisorySignalReplaySummary {
     pub ok: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitmentForecastReplaySummary {
+    pub fixture_path: String,
+    pub commitment_constraint_count: usize,
+    pub commitment_bound_action_count: usize,
+    pub expected_top_action: String,
+    pub actual_top_action: String,
+    pub constrained_action: String,
+    pub constrained_action_requires_confirmation: bool,
+    pub ok: bool,
+}
+
 pub fn load_fixture_events(path: &Path) -> anyhow::Result<Vec<RawEventInput>> {
     let file =
         File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
@@ -586,6 +598,72 @@ pub fn replay_lens_advisory_signal_fixture(
     })
 }
 
+pub fn replay_commitment_forecast_fixture(
+    path: &Path,
+) -> anyhow::Result<CommitmentForecastReplaySummary> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
+    let fixture: CommitmentForecastFixture = serde_json::from_reader(file)
+        .with_context(|| format!("invalid fixture {}", path.display()))?;
+    let tmp = tempfile::tempdir().context("failed to create commitment-forecast temp directory")?;
+    let data_dir = tmp.path().join("store");
+    let store = Store::open(data_dir.join("tfk.db"), data_dir.join("archive"))
+        .context("failed to open commitment-forecast store")?;
+
+    let continuation = store
+        .create_continuation(&continuation_input_from_commitment(&fixture.commitment))
+        .context("failed to create commitment forecast continuation")?;
+    let _commitment = store
+        .create_commitment(&fixture.commitment, &continuation.id)
+        .context("failed to create commitment forecast commitment")?;
+    let commitment_constraints = store
+        .active_commitments_for_continuations(std::slice::from_ref(&continuation.id))
+        .context("failed to load commitment forecast constraints")?;
+
+    let mut forecast = fixture.forecast;
+    let mut commitment_bound_action_count = 0;
+    for action in &mut forecast.actions {
+        if fixture.commitment_action_names.contains(&action.name) {
+            action.continuation_id = Some(continuation.id.clone());
+            commitment_bound_action_count += 1;
+        }
+    }
+
+    let result = ForecastScorer.score_with_commitments(&forecast, &commitment_constraints);
+    let actual_top_action = result
+        .ranked_actions
+        .first()
+        .map(|action| action.name.clone())
+        .unwrap_or_default();
+    let expected_top_action = fixture.expected.top_action;
+    let constrained_action = fixture.expected.constrained_action;
+    let constrained_ranked_action = result
+        .ranked_actions
+        .iter()
+        .find(|action| action.name == constrained_action);
+    let constrained_action_found = constrained_ranked_action.is_some();
+    let constrained_action_requires_confirmation = constrained_ranked_action
+        .map(|action| action.requires_confirmation)
+        .unwrap_or(false);
+    let ok = commitment_constraints.len() == fixture.expected.commitment_constraint_count
+        && commitment_bound_action_count == fixture.expected.commitment_bound_action_count
+        && actual_top_action == expected_top_action
+        && constrained_action_found
+        && constrained_action_requires_confirmation
+            == fixture.expected.constrained_action_requires_confirmation;
+
+    Ok(CommitmentForecastReplaySummary {
+        fixture_path: path.to_string_lossy().to_string(),
+        commitment_constraint_count: commitment_constraints.len(),
+        commitment_bound_action_count,
+        expected_top_action,
+        actual_top_action,
+        constrained_action,
+        constrained_action_requires_confirmation,
+        ok,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct ForecastFixture {
     request: ForecastRequest,
@@ -596,6 +674,23 @@ struct ForecastFixture {
     expected_advisory_signal_count: Option<usize>,
     #[serde(default)]
     expected_advisory_signal_names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitmentForecastFixture {
+    commitment: CommitRequest,
+    forecast: ForecastRequest,
+    commitment_action_names: Vec<String>,
+    expected: CommitmentForecastExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitmentForecastExpected {
+    commitment_constraint_count: usize,
+    commitment_bound_action_count: usize,
+    top_action: String,
+    constrained_action: String,
+    constrained_action_requires_confirmation: bool,
 }
 
 #[derive(Debug, Deserialize)]
