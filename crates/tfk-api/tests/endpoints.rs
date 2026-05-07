@@ -139,6 +139,101 @@ async fn forecast_endpoint_returns_ranked_candidate_actions() {
 }
 
 #[tokio::test]
+async fn forecast_endpoint_scores_persisted_commitment_constraints() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let commit = CommitRequest {
+        speaker: "agent".to_string(),
+        statement: "do not ship irreversible release until rollback evidence is verified"
+            .to_string(),
+        scope: Some("api-test/forecast-commitment".to_string()),
+        deadline: Some("2026-05-07".to_string()),
+        revocable: false,
+    };
+
+    let commit_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/commit", &commit))
+        .await
+        .unwrap();
+    assert_eq!(commit_response.status(), StatusCode::OK);
+    let commit_envelope: ApiEnvelope<StoredContinuation> = read_json(commit_response).await;
+    let continuation = commit_envelope.data.unwrap();
+
+    let list_response = app
+        .clone()
+        .oneshot(empty_request("GET", "/v1/commitments"))
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_envelope: ApiEnvelope<Vec<StoredCommitment>> = read_json(list_response).await;
+    let commitments = list_envelope.data.unwrap();
+    let stored_commitment = commitments
+        .iter()
+        .find(|commitment| commitment.continuation_id == continuation.id)
+        .expect("created commitment should be listed");
+
+    let forecast = ForecastRequest {
+        actions: vec![
+            CandidateAction {
+                name: "ship irreversible release".to_string(),
+                continuation_id: Some(continuation.id.clone()),
+                progress: 1.0,
+                closure: 0.9,
+                option_value_preserved: 0.6,
+                risk: 0.2,
+                irreversibility: 0.6,
+                confusion: 0.1,
+                friction: 0.1,
+                temporal_debt_added: 0.1,
+                uncertainty: 0.4,
+                externality: 0.4,
+            },
+            CandidateAction {
+                name: "verify rollback evidence".to_string(),
+                continuation_id: Some(continuation.id.clone()),
+                progress: 0.6,
+                closure: 0.2,
+                option_value_preserved: 0.8,
+                risk: 0.05,
+                irreversibility: 0.1,
+                confusion: 0.1,
+                friction: 0.2,
+                temporal_debt_added: 0.0,
+                uncertainty: 0.2,
+                externality: 0.1,
+            },
+        ],
+        relations: Vec::new(),
+    };
+
+    let forecast_response = app
+        .oneshot(json_request("POST", "/v1/forecast", &forecast))
+        .await
+        .unwrap();
+    assert_eq!(forecast_response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<ForecastResult> = read_json(forecast_response).await;
+    assert!(envelope.ok);
+    assert!(envelope.warnings.is_empty());
+    assert!(envelope.provenance.iter().any(|provenance| {
+        provenance.kind == "commitment" && provenance.id == stored_commitment.id
+    }));
+    let result = envelope.data.unwrap();
+    assert_eq!(result.ranked_actions[0].name, "verify rollback evidence");
+    let risky_action = result
+        .ranked_actions
+        .iter()
+        .find(|action| action.name == "ship irreversible release")
+        .expect("risky action should be ranked");
+    assert!(risky_action.requires_confirmation);
+    assert!(risky_action.ask_before_act);
+    assert!(risky_action
+        .reason
+        .contains("commitment_constraint_penalty"));
+}
+
+#[tokio::test]
 async fn advisory_forecast_signal_endpoints_list_get_and_forecast_provenance_roundtrip() {
     let tmp = tempdir().unwrap();
     let data_dir = tmp.path().join("data");

@@ -131,7 +131,7 @@ tfk preflight --uncertainty 0.9 --irreversibility 0.8 --externality 0.7
 
 ### POST /v1/forecast
 
-Accepts `ForecastRequest` and returns deterministic ranked actions. By default, `advisory_signals` is empty and response provenance is empty.
+Accepts `ForecastRequest` and returns deterministic ranked actions. If candidate actions include `continuation_id` values with active stored commitments, `/v1/forecast` loads those commitment constraints, applies commitment-aware score penalties/confirmation for high-consequence actions, and includes `ProvenanceRef { kind: "commitment", id }` entries for the commitments used in scoring. With no matching active commitments, response provenance remains empty unless advisory signals are persisted.
 
 `tfkd serve --forecast-advisory-json <path>` opt-in loads local static advisory signals and appends them to the deterministic forecast response. The file may be either a bare `AdvisoryForecastSignal[]` array or an object containing `advisory_signals`; fixture metadata such as `request` and `expected_*` is ignored. When non-empty advisory signals are successfully persisted, the forecast `ApiEnvelope.provenance` includes `ProvenanceRef { kind: "advisory_forecast_signal", id }` entries for the stored signal rows. If no advisory client is configured, the client returns no signals, or persistence fails, forecast scoring remains deterministic and advisory signal provenance stays empty (persistence failures are reported in `warnings`).
 
