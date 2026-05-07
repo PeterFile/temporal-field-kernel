@@ -37,20 +37,24 @@ It is not an agent memory platform. It is the layer that turns history into infl
 
 ## Current Boundary
 
-The current implementation is contract-level and local-first:
+The current implementation is contract-level and local-first. It includes:
 
-- raw event observation and append-only archive
-- rebuildable SQLite projection with search
-- minimal continuation graph with explicit idempotent continuation relations
-- continuation-aware temporal lens cards with raw event fallback
-- deterministic preflight scoring for path-choice confirmation
-- thin local API, CLI, and MCP wrapper
+- raw event observation with append-only archive and rebuildable SQLite projection search
+- continuation graph with explicit idempotent continuation relations
+- relation-aware temporal lens cards with raw event fallback
+- structured commitment capture/list support and lens constraints
+- deterministic preflight and forecast scoring for path-choice confirmation
+- optional static/stdio forecast advisory model client
+- persisted advisory forecast signals with API and CLI list/get flows
+- action-loop assimilate support
+- local UDS/HTTP API, thin MCP wrapper, and CLI adapter surface
+- TemporalBench runner for replaying fixtures against time-field behavior
 
 The kernel does not schedule work, own user workflows, provide a UI, or act as an agent memory product.
 
 ## Next Slices
 
-- Strengthen continuation influence in `/v1/lens` so active living pasts shape current context.
-- Add commitment capture and retrieval as first-class path-choice constraints.
-- Add advisory forecast signals for forming futures through the optional model client.
-- Expand TemporalBench fixtures around historical influence, commitments, and consequence-sensitive path choices.
+- Deepen lens influence ranking using relation kinds such as `supports`, `depends_on`, and `subsumes`, plus semantic, vector, and rules-derived influence.
+- Add commitment-aware path-choice scoring and lifecycle handling so commitments affect confirmation, completion, and release.
+- Add advisory signal retrieval through lens projection and filtering so forecast signals can be queried in context.
+- Expand the existing TemporalBench matrix with missing edge cases for relation-aware influence, commitment-sensitive path choices, advisory signals, and action-loop assimilation.
