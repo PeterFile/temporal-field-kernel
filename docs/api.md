@@ -165,4 +165,17 @@ Accepts `CommitRequest`, preserves the existing behavior of returning the create
 
 ### GET /v1/commitments
 
-Returns `ApiEnvelope<Vec<StoredCommitment>>` for active commitments whose linked continuation is still active.
+Returns `ApiEnvelope<Vec<StoredCommitment>>` for commitments where both `commitment.status` and the linked continuation `status` are `active`.
+
+Closed or retired commitments are omitted. They are not used by `/v1/lens` or `/v1/forecast` as active commitment constraints.
+
+### POST /v1/assimilate
+
+Accepts `TemporalDeltaInput` and persists one temporal delta transaction.
+
+Lifecycle coupling:
+
+- `Close` closes the target continuation and any linked active commitments by setting `commitment.status = closed`.
+- `Retire` retires the target continuation and linked active commitments only when all active linked commitments are revocable.
+- Retiring a non-revocable active commitment fails closed with HTTP 400, stores no temporal delta, and leaves the continuation and commitment statuses unchanged.
+- Closed and retired commitments are omitted from `GET /v1/commitments` and are not used by `/v1/lens` or `/v1/forecast` active constraints.

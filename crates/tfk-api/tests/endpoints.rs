@@ -1291,6 +1291,219 @@ async fn commit_endpoint_persists_retrievable_structured_active_commitment() {
 }
 
 #[tokio::test]
+async fn assimilate_endpoint_applies_commitment_lifecycle_for_close_and_revocable_retire() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let db_path = data_dir.join("tfk.db");
+    let archive_dir = data_dir.join("archive");
+    let store = Store::open(&db_path, &archive_dir).unwrap();
+    let app = tfk_api::router_with_store(store);
+
+    let close_continuation = create_commitment_via_api(
+        &app,
+        CommitRequest {
+            speaker: "agent".to_string(),
+            statement: "I will keep release gate closed until audit passes".to_string(),
+            scope: Some("release_gate".to_string()),
+            deadline: None,
+            revocable: false,
+        },
+    )
+    .await;
+    let close_commitment = get_commitment_for_continuation(&app, &close_continuation.id).await;
+
+    let retire_continuation = create_commitment_via_api(
+        &app,
+        CommitRequest {
+            speaker: "agent".to_string(),
+            statement: "I will run the revocable staging check".to_string(),
+            scope: Some("staging_check".to_string()),
+            deadline: None,
+            revocable: true,
+        },
+    )
+    .await;
+    let retire_commitment = get_commitment_for_continuation(&app, &retire_continuation.id).await;
+
+    let close_delta = TemporalDeltaInput {
+        action_id: "close-commitment-continuation".to_string(),
+        changes: vec![ContinuationStatusDelta {
+            continuation_id: close_continuation.id.clone(),
+            delta: ContinuationDelta::Close,
+        }],
+        claims_made: Vec::new(),
+        evidence: Vec::new(),
+    };
+    let close_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/assimilate", &close_delta))
+        .await
+        .unwrap();
+    assert_eq!(close_response.status(), StatusCode::OK);
+
+    let get_closed_response = app
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/v1/continuations/{}", close_continuation.id),
+        ))
+        .await
+        .unwrap();
+    let get_closed_envelope: ApiEnvelope<StoredContinuation> = read_json(get_closed_response).await;
+    assert_eq!(
+        get_closed_envelope.data.unwrap().status,
+        ContinuationStatus::Closed
+    );
+    let reopened = Store::open(&db_path, &archive_dir).unwrap();
+    assert_eq!(
+        reopened
+            .get_commitment(&close_commitment.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        ContinuationStatus::Closed
+    );
+
+    let retire_delta = TemporalDeltaInput {
+        action_id: "retire-revocable-commitment-continuation".to_string(),
+        changes: vec![ContinuationStatusDelta {
+            continuation_id: retire_continuation.id.clone(),
+            delta: ContinuationDelta::Retire,
+        }],
+        claims_made: Vec::new(),
+        evidence: Vec::new(),
+    };
+    let retire_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/assimilate", &retire_delta))
+        .await
+        .unwrap();
+    assert_eq!(retire_response.status(), StatusCode::OK);
+
+    let get_retired_response = app
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/v1/continuations/{}", retire_continuation.id),
+        ))
+        .await
+        .unwrap();
+    let get_retired_envelope: ApiEnvelope<StoredContinuation> =
+        read_json(get_retired_response).await;
+    assert_eq!(
+        get_retired_envelope.data.unwrap().status,
+        ContinuationStatus::Retired
+    );
+    let reopened = Store::open(&db_path, &archive_dir).unwrap();
+    assert_eq!(
+        reopened
+            .get_commitment(&retire_commitment.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        ContinuationStatus::Retired
+    );
+
+    let list_response = app
+        .oneshot(empty_request("GET", "/v1/commitments"))
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_envelope: ApiEnvelope<Vec<StoredCommitment>> = read_json(list_response).await;
+    let commitments = list_envelope.data.unwrap();
+    assert!(!commitments
+        .iter()
+        .any(|commitment| commitment.id == close_commitment.id));
+    assert!(!commitments
+        .iter()
+        .any(|commitment| commitment.id == retire_commitment.id));
+}
+
+#[tokio::test]
+async fn assimilate_endpoint_rejects_non_revocable_retire_and_rolls_back() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let db_path = data_dir.join("tfk.db");
+    let archive_dir = data_dir.join("archive");
+    let store = Store::open(&db_path, &archive_dir).unwrap();
+    let app = tfk_api::router_with_store(store);
+
+    let continuation = create_commitment_via_api(
+        &app,
+        CommitRequest {
+            speaker: "agent".to_string(),
+            statement: "I will keep the audit gate non-revocable".to_string(),
+            scope: Some("audit_gate".to_string()),
+            deadline: None,
+            revocable: false,
+        },
+    )
+    .await;
+    let commitment = get_commitment_for_continuation(&app, &continuation.id).await;
+    let delta = TemporalDeltaInput {
+        action_id: "reject-non-revocable-retire".to_string(),
+        changes: vec![ContinuationStatusDelta {
+            continuation_id: continuation.id.clone(),
+            delta: ContinuationDelta::Retire,
+        }],
+        claims_made: Vec::new(),
+        evidence: Vec::new(),
+    };
+
+    let response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/assimilate", &delta))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let envelope: ApiEnvelope<serde_json::Value> = read_json(response).await;
+    assert!(!envelope.ok);
+    assert!(envelope.warnings.iter().any(|warning| {
+        warning.contains("non-revocable")
+            && warning.contains("retire")
+            && warning.contains("commitment")
+    }));
+
+    let get_response = app
+        .clone()
+        .oneshot(empty_request(
+            "GET",
+            &format!("/v1/continuations/{}", continuation.id),
+        ))
+        .await
+        .unwrap();
+    let get_envelope: ApiEnvelope<StoredContinuation> = read_json(get_response).await;
+    assert_eq!(
+        get_envelope.data.unwrap().status,
+        ContinuationStatus::Active
+    );
+
+    let commitments_response = app
+        .oneshot(empty_request("GET", "/v1/commitments"))
+        .await
+        .unwrap();
+    let commitments_envelope: ApiEnvelope<Vec<StoredCommitment>> =
+        read_json(commitments_response).await;
+    assert!(commitments_envelope
+        .data
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == commitment.id));
+
+    let reopened = Store::open(&db_path, &archive_dir).unwrap();
+    assert_eq!(
+        reopened
+            .get_commitment(&commitment.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        ContinuationStatus::Active
+    );
+    assert!(reopened.list_temporal_deltas().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn assimilate_endpoint_persists_delta_and_updates_continuation_status() {
     let tmp = tempdir().unwrap();
     let store = open_test_store(tmp.path());
@@ -1376,6 +1589,40 @@ async fn assimilate_endpoint_rejects_missing_status_target() {
 fn open_test_store(root: &std::path::Path) -> Store {
     let data_dir = root.join("data");
     Store::open(data_dir.join("tfk.db"), data_dir.join("archive")).unwrap()
+}
+
+async fn create_commitment_via_api(
+    app: &axum::Router,
+    request: CommitRequest,
+) -> StoredContinuation {
+    let response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/commit", &request))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<StoredContinuation> = read_json(response).await;
+    assert!(envelope.ok);
+    envelope.data.unwrap()
+}
+
+async fn get_commitment_for_continuation(
+    app: &axum::Router,
+    continuation_id: &str,
+) -> StoredCommitment {
+    let response = app
+        .clone()
+        .oneshot(empty_request("GET", "/v1/commitments"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<Vec<StoredCommitment>> = read_json(response).await;
+    envelope
+        .data
+        .unwrap()
+        .into_iter()
+        .find(|commitment| commitment.continuation_id == continuation_id)
+        .expect("created commitment should be listed")
 }
 
 async fn create_continuation_via_api(app: &axum::Router, title: &str) -> StoredContinuation {
