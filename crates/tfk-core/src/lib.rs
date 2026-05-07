@@ -1,7 +1,8 @@
 use tfk_protocol::{
-    ContinuationDelta, ContinuationRelationEdge, ContinuationRelationKind, ContinuationStatus,
-    ContinuationType, ForecastRequest, ForecastResult, LensActiveContinuation, LensBoundary,
-    LensCard, LensPreferredAction, LensRequest, RankedAction, TemporalDebtWarning,
+    CandidateAction, ContinuationDelta, ContinuationRelationEdge, ContinuationRelationKind,
+    ContinuationStatus, ContinuationType, ForecastRequest, ForecastResult, LensActiveContinuation,
+    LensBoundary, LensCard, LensPreferredAction, LensRequest, RankedAction, StoredCommitment,
+    TemporalDebtWarning,
 };
 pub use tfk_protocol::{PreflightResult, PreflightSignals};
 
@@ -590,10 +591,20 @@ pub struct ForecastScorer;
 
 impl ForecastScorer {
     pub fn score(&self, request: &ForecastRequest) -> ForecastResult {
+        self.score_with_commitments(request, &[])
+    }
+
+    pub fn score_with_commitments(
+        &self,
+        request: &ForecastRequest,
+        commitments: &[StoredCommitment],
+    ) -> ForecastResult {
         let mut ranked_actions: Vec<_> = request
             .actions
             .iter()
             .map(|action| {
+                let matching_commitments = active_commitments_for_action(action, commitments);
+                let commitment_penalty = commitment_constraint_penalty(action, &matching_commitments);
                 let mut score = clamp01(action.progress)
                     + clamp01(action.closure)
                     + clamp01(action.option_value_preserved)
@@ -601,7 +612,8 @@ impl ForecastScorer {
                     - clamp01(action.irreversibility)
                     - clamp01(action.confusion)
                     - clamp01(action.friction)
-                    - clamp01(action.temporal_debt_added);
+                    - clamp01(action.temporal_debt_added)
+                    - commitment_penalty;
                 if action
                     .continuation_id
                     .as_ref()
@@ -613,18 +625,24 @@ impl ForecastScorer {
                 let requires_confirmation =
                     clamp01(action.uncertainty) * clamp01(action.irreversibility)
                         * clamp01(action.externality)
-                        > 0.5;
+                        > 0.5
+                        || commitment_requires_confirmation(action, &matching_commitments);
                 let ask_score = clamp01(action.uncertainty) + clamp01(action.risk)
                     - clamp01(action.friction)
                     - clamp01(action.progress);
                 let ask_before_act = requires_confirmation || ask_score > score;
+                let reason = if matching_commitments.is_empty() {
+                    "progress + closure + option_value_preserved - risk - irreversibility - confusion - friction - temporal_debt_added".to_string()
+                } else {
+                    "progress + closure + option_value_preserved - risk - irreversibility - confusion - friction - temporal_debt_added - commitment_constraint_penalty".to_string()
+                };
 
                 RankedAction {
                     name: action.name.clone(),
                     score,
                     requires_confirmation,
                     ask_before_act,
-                    reason: "progress + closure + option_value_preserved - risk - irreversibility - confusion - friction - temporal_debt_added".to_string(),
+                    reason,
                 }
             })
             .collect();
@@ -634,6 +652,49 @@ impl ForecastScorer {
             advisory_signals: Vec::new(),
         }
     }
+}
+
+fn active_commitments_for_action<'a>(
+    action: &CandidateAction,
+    commitments: &'a [StoredCommitment],
+) -> Vec<&'a StoredCommitment> {
+    let Some(continuation_id) = action.continuation_id.as_deref() else {
+        return Vec::new();
+    };
+    commitments
+        .iter()
+        .filter(|commitment| commitment.status == ContinuationStatus::Active)
+        .filter(|commitment| commitment.continuation_id == continuation_id)
+        .collect()
+}
+
+fn commitment_constraint_penalty(
+    action: &CandidateAction,
+    commitments: &[&StoredCommitment],
+) -> f64 {
+    if commitments.is_empty() {
+        return 0.0;
+    }
+    let commitment_weight = commitments
+        .iter()
+        .map(|commitment| if commitment.revocable { 0.25 } else { 0.55 })
+        .fold(0.0, f64::max);
+    commitment_weight * commitment_consequence(action)
+}
+
+fn commitment_requires_confirmation(
+    action: &CandidateAction,
+    commitments: &[&StoredCommitment],
+) -> bool {
+    commitments
+        .iter()
+        .any(|commitment| !commitment.revocable && commitment_consequence(action) >= 0.5)
+}
+
+fn commitment_consequence(action: &CandidateAction) -> f64 {
+    clamp01(action.irreversibility)
+        .max(clamp01(action.risk))
+        .max(clamp01(action.temporal_debt_added))
 }
 
 fn is_constrained_by_explicit_relation(id: &str, relations: &[ContinuationRelationEdge]) -> bool {
