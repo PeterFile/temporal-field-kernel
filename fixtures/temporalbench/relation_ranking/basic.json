@@ -1,0 +1,100 @@
+{
+  "continuations": [
+    {
+      "label": "baseline",
+      "input": {
+        "title": "relation ranking baseline action",
+        "summary": "relation ranking baseline action keeps the unmodified activation floor",
+        "continuation_type": "obligation",
+        "status": "active"
+      }
+    },
+    {
+      "label": "supported",
+      "input": {
+        "title": "relation ranking supported action",
+        "summary": "relation ranking supported action should rise above the baseline",
+        "continuation_type": "obligation",
+        "status": "active"
+      }
+    },
+    {
+      "label": "prerequisite",
+      "input": {
+        "title": "relation ranking prerequisite action",
+        "summary": "relation ranking prerequisite action receives support and dependency pressure",
+        "continuation_type": "obligation",
+        "status": "active"
+      }
+    },
+    {
+      "label": "dependent",
+      "input": {
+        "title": "relation ranking dependent action",
+        "summary": "",
+        "continuation_type": "obligation",
+        "status": "active"
+      }
+    },
+    {
+      "label": "umbrella",
+      "input": {
+        "title": "relation ranking umbrella action",
+        "summary": "relation ranking umbrella action should outrank the supported-only path",
+        "continuation_type": "obligation",
+        "status": "active"
+      }
+    },
+    {
+      "label": "child",
+      "input": {
+        "title": "relation ranking child action",
+        "summary": "relation ranking child action is intentionally lower than the baseline",
+        "continuation_type": "obligation",
+        "status": "active"
+      }
+    }
+  ],
+  "relations": [
+    {
+      "from": "baseline",
+      "to": "supported",
+      "kind": "supports",
+      "reason": "support-only relation should lift the target continuation"
+    },
+    {
+      "from": "supported",
+      "to": "prerequisite",
+      "kind": "supports",
+      "reason": "support composes with dependency pressure on the target"
+    },
+    {
+      "from": "dependent",
+      "to": "prerequisite",
+      "kind": "depends_on",
+      "reason": "dependency should prioritize the prerequisite over the dependent"
+    },
+    {
+      "from": "umbrella",
+      "to": "child",
+      "kind": "subsumes",
+      "reason": "subsuming parent should outrank the child it absorbs"
+    }
+  ],
+  "lens": {
+    "query": "relation ranking",
+    "horizon": [],
+    "perspective": ["action"]
+  },
+  "expected": {
+    "top_title": "relation ranking prerequisite action",
+    "ordered_titles": [
+      "relation ranking prerequisite action",
+      "relation ranking umbrella action",
+      "relation ranking supported action",
+      "relation ranking baseline action",
+      "relation ranking child action",
+      "relation ranking dependent action"
+    ]
+  }
+}
