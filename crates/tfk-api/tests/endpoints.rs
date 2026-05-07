@@ -358,6 +358,68 @@ async fn continuation_relations_endpoint_roundtrips() {
 }
 
 #[tokio::test]
+async fn continuation_relations_endpoint_is_idempotent_for_same_triple() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let left = create_continuation_via_api(&app, "idempotent relation left").await;
+    let right = create_continuation_via_api(&app, "idempotent relation right").await;
+    let first_relation = ContinuationRelationEdge {
+        from_id: left.id.clone(),
+        to_id: right.id.clone(),
+        kind: ContinuationRelationKind::DependsOn,
+        reason: Some("original reason".to_string()),
+    };
+    let changed_relation = ContinuationRelationEdge {
+        from_id: left.id,
+        to_id: right.id,
+        kind: ContinuationRelationKind::DependsOn,
+        reason: Some("changed reason should not replace existing".to_string()),
+    };
+
+    let first_response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/continuation-relations",
+            &first_relation,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_envelope: ApiEnvelope<ContinuationRelationEdge> = read_json(first_response).await;
+    assert!(first_envelope.ok);
+    let first_stored = first_envelope.data.unwrap();
+    assert_eq!(first_stored, first_relation);
+
+    let second_response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/continuation-relations",
+            &changed_relation,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_envelope: ApiEnvelope<ContinuationRelationEdge> = read_json(second_response).await;
+    assert!(second_envelope.ok);
+    assert_eq!(second_envelope.data.unwrap(), first_stored);
+
+    let list_response = app
+        .oneshot(empty_request("GET", "/v1/continuation-relations"))
+        .await
+        .unwrap();
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_envelope: ApiEnvelope<Vec<ContinuationRelationEdge>> = read_json(list_response).await;
+    assert!(list_envelope.ok);
+    assert_eq!(list_envelope.data.unwrap(), vec![first_stored]);
+}
+
+#[tokio::test]
 async fn continuation_relations_endpoint_rejects_unknown_endpoint() {
     let tmp = tempdir().unwrap();
     let store = open_test_store(tmp.path());

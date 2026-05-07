@@ -7,6 +7,8 @@ POST /v1/observe
 POST /v1/continuations
 GET  /v1/continuations
 GET  /v1/continuations/:id
+POST /v1/continuation-relations
+GET  /v1/continuation-relations
 POST /v1/lens
 POST /v1/forecast
 POST /v1/preflight
@@ -76,6 +78,29 @@ Returns `ApiEnvelope<Vec<StoredContinuation>>` ordered by creation time.
 ### GET /v1/continuations/:id
 
 Returns `ApiEnvelope<StoredContinuation>` for one stored continuation, or a 404 envelope.
+
+### POST /v1/continuation-relations
+
+Accepts `ContinuationRelationEdge` and records an explicit relation between two existing continuations.
+
+Minimal body:
+
+```json
+{
+  "from_id": "cont_left",
+  "to_id": "cont_right",
+  "kind": "blocks",
+  "reason": "right waits for left"
+}
+```
+
+The idempotency key is `(from_id, to_id, kind)`. Repeating a create with the same triple returns the existing stored edge and does not replace its original `reason`. If either endpoint continuation is missing, the API returns `BAD_REQUEST` with a warning containing `invalid continuation relation`.
+
+Returns `ApiEnvelope<ContinuationRelationEdge>`.
+
+### GET /v1/continuation-relations
+
+Returns `ApiEnvelope<Vec<ContinuationRelationEdge>>` for stored continuation relations.
 
 ### POST /v1/preflight
 
