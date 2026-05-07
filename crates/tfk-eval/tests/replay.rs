@@ -29,6 +29,11 @@ fn action_loop_fixture_path() -> PathBuf {
         .join("../../fixtures/temporalbench/action_loop/commit_forecast_assimilate.json")
 }
 
+fn commitment_consequence_choice_action_loop_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/action_loop/commitment_consequence_choice.json")
+}
+
 fn lens_linked_raw_event_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/temporalbench/lens_linked_raw_event/basic.json")
@@ -233,6 +238,24 @@ fn action_loop_fixture_replay_checks_commit_forecast_assimilate_lens_closure() {
     assert_eq!(summary.reopened_status, "closed");
     assert_eq!(summary.commitment_constraint_count_after_assimilate, 0);
     assert_eq!(summary.active_pressure_count_after_assimilate, 0);
+    assert!(summary.ok);
+}
+
+#[test]
+fn action_loop_consequence_choice_replay_keeps_commitment_active_after_verify() {
+    let summary =
+        replay_action_loop_fixture(&commitment_consequence_choice_action_loop_fixture_path())
+            .unwrap();
+
+    assert_eq!(summary.commitment_constraint_count, 1);
+    assert_eq!(summary.active_pressure_count_before_assimilate, 1);
+    assert!(summary.preflight_requires_confirmation);
+    assert_eq!(summary.forecast_top_action, "verify rollback evidence");
+    assert!(summary.assimilation_action_matches_forecast);
+    assert_eq!(summary.assimilated_status, "active");
+    assert_eq!(summary.reopened_status, "active");
+    assert_eq!(summary.commitment_constraint_count_after_assimilate, 1);
+    assert_eq!(summary.active_pressure_count_after_assimilate, 1);
     assert!(summary.ok);
 }
 
