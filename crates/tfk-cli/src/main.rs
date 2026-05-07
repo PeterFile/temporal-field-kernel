@@ -69,6 +69,11 @@ enum Command {
         #[arg(long)]
         json_file: PathBuf,
     },
+    /// List or get advisory forecast signals through the local tfkd daemon.
+    AdvisoryForecastSignal {
+        #[command(subcommand)]
+        command: AdvisoryForecastSignalCommand,
+    },
     /// Apply an action-loop temporal delta through the local tfkd daemon.
     Assimilate {
         #[arg(long)]
@@ -143,6 +148,14 @@ enum CommitCommand {
         )]
         revocable: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum AdvisoryForecastSignalCommand {
+    /// List advisory forecast signals.
+    List,
+    /// Get one advisory forecast signal.
+    Get { id: String },
 }
 
 #[tokio::main]
@@ -274,6 +287,23 @@ async fn main() -> anyhow::Result<()> {
                 tfk_cli::request_json_over_uds(&socket_path, forecast_endpoint(), &body).await?;
             print_json(&response)?;
         }
+        Command::AdvisoryForecastSignal { command } => match command {
+            AdvisoryForecastSignalCommand::List => {
+                let response = tfk_cli::request_over_uds(
+                    &socket_path,
+                    "GET",
+                    advisory_forecast_signals_endpoint(),
+                    b"",
+                )
+                .await?;
+                print_json(&response)?;
+            }
+            AdvisoryForecastSignalCommand::Get { id } => {
+                let path = advisory_forecast_signal_get_path(&id)?;
+                let response = tfk_cli::request_over_uds(&socket_path, "GET", &path, b"").await?;
+                print_json(&response)?;
+            }
+        },
         Command::Assimilate { json_file } => {
             let body = json_file_body::<TemporalDeltaInput>(&json_file)?;
             let response =
@@ -299,14 +329,29 @@ fn default_socket_path() -> PathBuf {
 }
 
 fn continuation_get_path(id: &str) -> anyhow::Result<String> {
-    if id.is_empty()
-        || !id
+    resource_get_path("/v1/continuations", id, "continuation id")
+}
+
+fn advisory_forecast_signal_get_path(id: &str) -> anyhow::Result<String> {
+    resource_get_path(
+        advisory_forecast_signals_endpoint(),
+        id,
+        "advisory forecast signal id",
+    )
+}
+
+fn resource_get_path(base_path: &str, id: &str, label: &str) -> anyhow::Result<String> {
+    if !is_safe_path_id(id) {
+        bail!("invalid {label}");
+    }
+    Ok(format!("{base_path}/{id}"))
+}
+
+fn is_safe_path_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-    {
-        bail!("invalid continuation id");
-    }
-    Ok(format!("/v1/continuations/{id}"))
 }
 
 fn preflight_request_body(
@@ -392,6 +437,10 @@ fn relation_endpoint() -> &'static str {
 
 fn forecast_endpoint() -> &'static str {
     "/v1/forecast"
+}
+
+fn advisory_forecast_signals_endpoint() -> &'static str {
+    "/v1/advisory-forecast-signals"
 }
 
 fn assimilate_endpoint() -> &'static str {
@@ -771,6 +820,69 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_advisory_forecast_signal_list_command() {
+        let cli = Cli::parse_from(["tfk", "advisory-forecast-signal", "list"]);
+
+        assert!(matches!(
+            cli.command,
+            Command::AdvisoryForecastSignal {
+                command: AdvisoryForecastSignalCommand::List
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_advisory_forecast_signal_get_command() {
+        let cli = Cli::parse_from(["tfk", "advisory-forecast-signal", "get", "sig_abc-123"]);
+
+        match cli.command {
+            Command::AdvisoryForecastSignal {
+                command: AdvisoryForecastSignalCommand::Get { id },
+            } => assert_eq!(id, "sig_abc-123"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advisory_forecast_signal_get_path_allows_safe_ascii_id() {
+        let path = advisory_forecast_signal_get_path("Signal_abc-123").unwrap();
+
+        assert_eq!(path, "/v1/advisory-forecast-signals/Signal_abc-123");
+    }
+
+    #[test]
+    fn advisory_forecast_signal_get_path_rejects_request_line_and_path_injection() {
+        for id in [
+            "",
+            "sig\r\nX-Bad: true",
+            "sig\nX-Bad: true",
+            "sig/../other",
+            "sig%2Fother",
+        ] {
+            let error = advisory_forecast_signal_get_path(id).unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid advisory forecast signal id"),
+                "unexpected error for {id:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn advisory_forecast_signal_endpoint_paths_are_stable() {
+        assert_eq!(
+            advisory_forecast_signals_endpoint(),
+            "/v1/advisory-forecast-signals"
+        );
+        assert_eq!(
+            advisory_forecast_signal_get_path("sig_123").unwrap(),
+            "/v1/advisory-forecast-signals/sig_123"
+        );
     }
 
     #[test]
