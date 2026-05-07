@@ -1,0 +1,95 @@
+{
+  "commitment": {
+    "speaker": "agent",
+    "statement": "before rollback evidence and owner confirmation, do not execute irreversible release",
+    "scope": "temporalbench/action-loop/consequence-choice",
+    "deadline": "2026-05-07",
+    "revocable": true
+  },
+  "lens": {
+    "query": "irreversible release",
+    "horizon": ["next-action"],
+    "perspective": ["commitment", "action"]
+  },
+  "preflight": {
+    "uncertainty": 0.95,
+    "irreversibility": 0.95,
+    "externality": 0.9,
+    "option_value_loss": 0.85
+  },
+  "forecast": {
+    "actions": [
+      {
+        "name": "publish irreversible release",
+        "continuation_id": null,
+        "progress": 0.95,
+        "closure": 0.85,
+        "option_value_preserved": 0.05,
+        "risk": 1.0,
+        "irreversibility": 1.0,
+        "confusion": 0.2,
+        "friction": 0.1,
+        "temporal_debt_added": 0.9,
+        "uncertainty": 0.95,
+        "externality": 0.95
+      },
+      {
+        "name": "verify rollback evidence",
+        "continuation_id": null,
+        "progress": 0.55,
+        "closure": 0.35,
+        "option_value_preserved": 0.95,
+        "risk": 0.1,
+        "irreversibility": 0.05,
+        "confusion": 0.05,
+        "friction": 0.15,
+        "temporal_debt_added": 0.0,
+        "uncertainty": 0.2,
+        "externality": 0.1
+      },
+      {
+        "name": "prepare rollback plan",
+        "continuation_id": null,
+        "progress": 0.45,
+        "closure": 0.4,
+        "option_value_preserved": 0.9,
+        "risk": 0.15,
+        "irreversibility": 0.1,
+        "confusion": 0.05,
+        "friction": 0.2,
+        "temporal_debt_added": 0.0,
+        "uncertainty": 0.25,
+        "externality": 0.1
+      },
+      {
+        "name": "ask owner for confirmation",
+        "continuation_id": null,
+        "progress": 0.35,
+        "closure": 0.25,
+        "option_value_preserved": 0.85,
+        "risk": 0.05,
+        "irreversibility": 0.0,
+        "confusion": 0.1,
+        "friction": 0.25,
+        "temporal_debt_added": 0.0,
+        "uncertainty": 0.1,
+        "externality": 0.05
+      }
+    ],
+    "relations": []
+  },
+  "assimilation": {
+    "action_id": "verify rollback evidence",
+    "delta": "verify"
+  },
+  "expected": {
+    "commitment_constraint_count": 1,
+    "active_pressure_count_before_assimilate": 1,
+    "preflight_requires_confirmation": true,
+    "forecast_top_action": "verify rollback evidence",
+    "assimilated_status": "active",
+    "reopened_status": "active",
+    "commitment_constraint_count_after_assimilate": 1,
+    "active_pressure_count_after_assimilate": 1
+  }
+}
