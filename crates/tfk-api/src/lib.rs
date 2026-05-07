@@ -219,8 +219,12 @@ async fn forecast_handler(
     let mut provenance = Vec::new();
 
     if let Some(client) = &state.forecast_client {
-        match client.forecast(&request) {
-            Ok(signals) => {
+        match client.forecast_with_status(&request) {
+            Ok(status) => {
+                if status.degraded {
+                    warnings.push(degraded_forecast_warning(status.reason.as_deref()));
+                }
+                let signals = status.advisory_signals;
                 if !signals.is_empty() {
                     let persist_result = state
                         .store
@@ -292,6 +296,16 @@ async fn get_advisory_forecast_signal_handler(
         "local-advisory-forecast-signal-get",
         signal,
     )))
+}
+
+fn degraded_forecast_warning(reason: Option<&str>) -> String {
+    let reason = reason.map(str::trim).filter(|reason| !reason.is_empty());
+    match reason {
+        Some(reason) => {
+            format!("forecast advisory model degraded; deterministic result returned: {reason}")
+        }
+        None => "forecast advisory model degraded; deterministic result returned".to_string(),
+    }
 }
 
 async fn commit_handler(

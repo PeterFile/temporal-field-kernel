@@ -33,11 +33,35 @@ pub trait PredictionClient {
     fn predict(&self, request_id: &str) -> Result<PredictionResponse, ModelClientError>;
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForecastPredictionStatus {
+    pub advisory_signals: Vec<AdvisoryForecastSignal>,
+    pub degraded: bool,
+    pub reason: Option<String>,
+}
+
+impl ForecastPredictionStatus {
+    pub fn ready(advisory_signals: Vec<AdvisoryForecastSignal>) -> Self {
+        Self {
+            advisory_signals,
+            degraded: false,
+            reason: None,
+        }
+    }
+}
+
 pub trait ForecastPredictionClient: Send + Sync {
     fn forecast(
         &self,
         request: &ForecastRequest,
     ) -> Result<Vec<AdvisoryForecastSignal>, ModelClientError>;
+
+    fn forecast_with_status(
+        &self,
+        request: &ForecastRequest,
+    ) -> Result<ForecastPredictionStatus, ModelClientError> {
+        self.forecast(request).map(ForecastPredictionStatus::ready)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +89,14 @@ impl ForecastPredictionClient for StdioForecastClient {
         &self,
         request: &ForecastRequest,
     ) -> Result<Vec<AdvisoryForecastSignal>, ModelClientError> {
+        self.forecast_with_status(request)
+            .map(|status| status.advisory_signals)
+    }
+
+    fn forecast_with_status(
+        &self,
+        request: &ForecastRequest,
+    ) -> Result<ForecastPredictionStatus, ModelClientError> {
         let command = describe_sidecar_command(&self.program, &self.args);
         let payload = StdioForecastRequest {
             request_id: "local-forecast",
@@ -138,10 +170,16 @@ impl ForecastPredictionClient for StdioForecastClient {
             ))
         })?;
 
-        response.advisory_signals.ok_or_else(|| {
+        let advisory_signals = response.advisory_signals.ok_or_else(|| {
             ModelClientError::PredictionFailed(format!(
                 "missing advisory_signals in forecast sidecar response from {command}"
             ))
+        })?;
+
+        Ok(ForecastPredictionStatus {
+            advisory_signals,
+            degraded: response.degraded,
+            reason: response.reason,
         })
     }
 }
@@ -155,6 +193,9 @@ struct StdioForecastRequest<'a> {
 #[derive(Deserialize)]
 struct StdioForecastResponse {
     advisory_signals: Option<Vec<AdvisoryForecastSignal>>,
+    #[serde(default)]
+    degraded: bool,
+    reason: Option<String>,
 }
 
 fn describe_sidecar_command(program: &Path, args: &[OsString]) -> String {

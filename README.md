@@ -42,7 +42,7 @@ cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock assimilate --json-file /tmp/delta
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock lens "项目状态机"
 ```
 
-`--forecast-advisory-json` is opt-in. It loads local static advisory forecast signals from either a bare `AdvisoryForecastSignal[]` JSON file or an object containing `advisory_signals`. `--forecast-sidecar-command` is also opt-in and runs a local stdio sidecar command with repeated `--forecast-sidecar-arg` values; the bundled Python sidecar emits `advisory_signals` and degrades to a deterministic heuristic when `river` is not installed. When both flags are omitted, forecast behavior is unchanged; the deterministic scorer still runs in all cases.
+`--forecast-advisory-json` is opt-in. It loads local static advisory forecast signals from either a bare `AdvisoryForecastSignal[]` JSON file or an object containing `advisory_signals`. `--forecast-sidecar-command` is also opt-in and runs a local stdio sidecar command with repeated `--forecast-sidecar-arg` values; the bundled Python sidecar emits `advisory_signals` and degrades to a deterministic heuristic when `river` is not installed. Degraded forecast sidecar status is exposed as `/v1/forecast` envelope warnings without changing deterministic forecast results. When both flags are omitted, forecast behavior is unchanged; the deterministic scorer still runs in all cases.
 
 Continuation relation create/list is a smoke path for explicit graph edges between existing continuation IDs. Repeating `relation create` with the same `--from-id`, `--to-id`, and `--kind` is idempotent: it returns the existing edge and keeps the original reason.
 

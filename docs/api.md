@@ -143,6 +143,8 @@ Returns `ApiEnvelope<Vec<StoredAdvisoryForecastSignal>>` for persisted advisory 
 
 Returns `ApiEnvelope<StoredAdvisoryForecastSignal>` for one persisted advisory forecast signal, or a 404 envelope when the id is missing.
 
+When the optional forecast sidecar reports `degraded: true`, `/v1/forecast` still returns HTTP 200 with the deterministic ranked actions and surfaces the sidecar reason in the envelope `warnings`.
+
 ### POST /v1/lens
 
 Accepts `LensRequest`:
