@@ -213,10 +213,38 @@ async fn preflight_handler(
 async fn forecast_handler(
     State(state): State<ApiState>,
     Json(request): Json<ForecastRequest>,
-) -> Json<ApiEnvelope<ForecastResult>> {
-    let mut result = state.forecast_scorer.score(&request);
+) -> Result<Json<ApiEnvelope<ForecastResult>>, ApiError> {
     let mut warnings = Vec::new();
-    let mut provenance = Vec::new();
+    let mut continuation_ids = Vec::new();
+    for continuation_id in request
+        .actions
+        .iter()
+        .filter_map(|action| action.continuation_id.clone())
+    {
+        if !continuation_ids.contains(&continuation_id) {
+            continuation_ids.push(continuation_id);
+        }
+    }
+    let commitment_constraints = if continuation_ids.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .store
+            .lock()
+            .map_err(|_| internal_error("store lock poisoned"))?
+            .active_commitments_for_continuations(&continuation_ids)
+            .map_err(|error| internal_error(error.to_string()))?
+    };
+    let mut result = state
+        .forecast_scorer
+        .score_with_commitments(&request, &commitment_constraints);
+    let mut provenance: Vec<_> = commitment_constraints
+        .iter()
+        .map(|commitment| ProvenanceRef {
+            kind: "commitment".to_string(),
+            id: commitment.id.clone(),
+        })
+        .collect();
 
     if let Some(client) = &state.forecast_client {
         match client.forecast_with_status(&request) {
@@ -259,7 +287,7 @@ async fn forecast_handler(
     envelope.warnings = warnings;
     envelope.provenance = provenance;
 
-    Json(envelope)
+    Ok(Json(envelope))
 }
 
 async fn list_advisory_forecast_signals_handler(
@@ -729,4 +757,85 @@ fn not_found_error(message: impl Into<String>) -> ApiError {
             provenance: Vec::new(),
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
+    use tempfile::tempdir;
+    use tfk_protocol::CandidateAction;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn forecast_endpoint_fails_closed_when_commitment_store_lock_is_poisoned() {
+        let tmp = tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let store = Store::open(data_dir.join("tfk.db"), data_dir.join("archive")).unwrap();
+        let shared_store = Arc::new(Mutex::new(store));
+
+        let poison_target = Arc::clone(&shared_store);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target.lock().unwrap();
+            panic!("poison commitment store lock");
+        })
+        .join();
+        assert!(shared_store.lock().is_err());
+
+        let app = router_with_state(ApiState {
+            store: shared_store,
+            preflight_scorer: PreflightScorer::with_threshold(0.5),
+            forecast_scorer: ForecastScorer,
+            forecast_client: None,
+        });
+        let request = ForecastRequest {
+            actions: vec![CandidateAction {
+                name: "ship irreversible release".to_string(),
+                continuation_id: Some("commitment-bound-continuation".to_string()),
+                progress: 0.9,
+                closure: 0.8,
+                option_value_preserved: 0.1,
+                risk: 0.9,
+                irreversibility: 0.9,
+                confusion: 0.2,
+                friction: 0.2,
+                temporal_debt_added: 0.8,
+                uncertainty: 0.2,
+                externality: 0.5,
+            }],
+            relations: Vec::new(),
+        };
+
+        let response = app
+            .oneshot(json_request("POST", "/v1/forecast", &request))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let envelope: ApiEnvelope<Value> = read_json(response).await;
+        assert!(!envelope.ok);
+        assert!(envelope.data.is_none());
+        assert!(envelope
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("store lock poisoned")));
+    }
+
+    fn json_request<T: serde::Serialize>(method: &str, uri: &str, body: &T) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap()
+    }
+
+    async fn read_json<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
 }
