@@ -10,8 +10,8 @@ use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{
     AdvisoryForecastSignal, CommitRequest, ContinuationDelta, ContinuationRelationEdge,
     ContinuationRelationKind, ContinuationStatus, ContinuationStatusDelta, ContinuationType,
-    EventModality, EventSource, EvidenceStatus, ForecastRequest, LensCard, LensRequest,
-    PreflightSignals, RawEventInput, TemporalDeltaInput,
+    EventModality, EventSource, EvidenceStatus, ForecastRequest, LensAdvisoryForecastSignal,
+    LensCard, LensRequest, PreflightSignals, RawEventInput, TemporalDeltaInput,
 };
 use tfk_store::Store;
 
@@ -85,6 +85,18 @@ pub struct RelationRankingReplaySummary {
     pub expected_ordered_titles: Vec<String>,
     pub actual_ordered_ids: Vec<String>,
     pub actual_ordered_titles: Vec<String>,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LensAdvisorySignalReplaySummary {
+    pub fixture_path: String,
+    pub continuation_count: usize,
+    pub expected_active_continuation_titles: Vec<String>,
+    pub actual_active_continuation_titles: Vec<String>,
+    pub expected_advisory_signal_names: Vec<String>,
+    pub actual_advisory_signal_names: Vec<String>,
+    pub advisory_signal_count: usize,
     pub ok: bool,
 }
 
@@ -522,6 +534,58 @@ pub fn replay_relation_ranking_fixture(
     })
 }
 
+pub fn replay_lens_advisory_signal_fixture(
+    path: &Path,
+) -> anyhow::Result<LensAdvisorySignalReplaySummary> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
+    let fixture: LensAdvisorySignalFixture = serde_json::from_reader(file)
+        .with_context(|| format!("invalid fixture {}", path.display()))?;
+    let tmp = tempfile::tempdir().context("failed to create lens-advisory temp directory")?;
+    let data_dir = tmp.path().join("store");
+    let store = Store::open(data_dir.join("tfk.db"), data_dir.join("archive"))
+        .context("failed to open lens-advisory store")?;
+
+    let continuation_count = fixture.continuations.len();
+    for continuation in &fixture.continuations {
+        store
+            .create_continuation(&continuation.input)
+            .with_context(|| format!("failed to create continuation {}", continuation.label))?;
+    }
+    store
+        .record_advisory_forecast_signals(&fixture.advisory_signals)
+        .context("failed to persist advisory forecast signals")?;
+
+    let card = lens_from_store(&store, &fixture.lens)
+        .context("failed to run lens advisory signal projection")?;
+    let actual_active_continuation_titles: Vec<_> = card
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.title.clone())
+        .collect();
+    let actual_advisory_signal_names: Vec<_> = card
+        .advisory_forecast_signals
+        .iter()
+        .map(|signal| signal.name.clone())
+        .collect();
+    let advisory_signal_count = actual_advisory_signal_names.len();
+    let expected_active_continuation_titles = fixture.expected.active_continuation_titles;
+    let expected_advisory_signal_names = fixture.expected.advisory_signal_names;
+    let ok = actual_active_continuation_titles == expected_active_continuation_titles
+        && actual_advisory_signal_names == expected_advisory_signal_names;
+
+    Ok(LensAdvisorySignalReplaySummary {
+        fixture_path: path.to_string_lossy().to_string(),
+        continuation_count,
+        expected_active_continuation_titles,
+        actual_active_continuation_titles,
+        expected_advisory_signal_names,
+        actual_advisory_signal_names,
+        advisory_signal_count,
+        ok,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct ForecastFixture {
     request: ForecastRequest,
@@ -654,6 +718,26 @@ struct RelationRankingExpected {
 }
 
 #[derive(Debug, Deserialize)]
+struct LensAdvisorySignalFixture {
+    continuations: Vec<LensAdvisorySignalContinuation>,
+    advisory_signals: Vec<AdvisoryForecastSignal>,
+    lens: LensRequest,
+    expected: LensAdvisorySignalExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct LensAdvisorySignalContinuation {
+    label: String,
+    input: tfk_protocol::ContinuationInput,
+}
+
+#[derive(Debug, Deserialize)]
+struct LensAdvisorySignalExpected {
+    active_continuation_titles: Vec<String>,
+    advisory_signal_names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct FixtureEventRecord {
     #[serde(default = "default_session_id")]
     session_id: String,
@@ -687,6 +771,9 @@ impl From<FixtureEventRecord> for RawEventInput {
 }
 
 fn lens_from_store(store: &Store, request: &LensRequest) -> anyhow::Result<LensCard> {
+    let advisory_signals = store
+        .search_advisory_forecast_signals(&request.query)
+        .context("failed to search advisory forecast signals")?;
     let continuation_ids = store
         .search_continuations(&request.query)
         .context("failed to search continuations")?;
@@ -793,7 +880,25 @@ fn lens_from_store(store: &Store, request: &LensRequest) -> anyhow::Result<LensC
         raw_event_count,
     );
     card.commitment_constraints = commitment_constraints;
+    card.advisory_forecast_signals = advisory_signals
+        .iter()
+        .map(lens_advisory_forecast_signal)
+        .collect();
     Ok(card)
+}
+
+fn lens_advisory_forecast_signal(
+    signal: &tfk_store::StoredAdvisoryForecastSignal,
+) -> LensAdvisoryForecastSignal {
+    LensAdvisoryForecastSignal {
+        id: signal.id.clone(),
+        name: signal.name.clone(),
+        confidence: signal.confidence,
+        model: signal.model.clone(),
+        action_name: signal.action_name.clone(),
+        reason: signal.reason.clone(),
+        created_at: signal.created_at.clone(),
+    }
 }
 
 fn boundary_kinds(card: &LensCard) -> Vec<String> {

@@ -1,0 +1,38 @@
+{
+  "continuations": [
+    {
+      "label": "release",
+      "input": {
+        "title": "irreversible release decision",
+        "summary": "release gate context needs rollback evidence before ship",
+        "continuation_type": "risk",
+        "status": "active"
+      }
+    }
+  ],
+  "advisory_signals": [
+    {
+      "name": "rollback_evidence_gap",
+      "model": "fixture-static",
+      "confidence": 0.93,
+      "action_name": "verify rollback evidence",
+      "reason": "rollback evidence is missing before irreversible release"
+    },
+    {
+      "name": "unrelated_calendar_pressure",
+      "model": "fixture-static",
+      "confidence": 0.42,
+      "action_name": "schedule review",
+      "reason": "calendar drift does not mention the release gate"
+    }
+  ],
+  "lens": {
+    "query": "rollback evidence",
+    "horizon": [],
+    "perspective": ["risk"]
+  },
+  "expected": {
+    "active_continuation_titles": ["irreversible release decision"],
+    "advisory_signal_names": ["rollback_evidence_gap"]
+  }
+}
