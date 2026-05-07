@@ -11,7 +11,7 @@ use tfk_protocol::{
     LensCard, LensRequest, PreflightResult, PreflightSignals, RawEventInput, StoredCommitment,
     StoredContinuation, TemporalDeltaInput,
 };
-use tfk_store::{Store, StoredRawEvent};
+use tfk_store::{Store, StoredAdvisoryForecastSignal, StoredRawEvent};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -133,10 +133,11 @@ async fn forecast_endpoint_returns_ranked_candidate_actions() {
     assert!(result.ranked_actions[1].requires_confirmation);
     assert!(result.advisory_signals.is_empty());
     assert!(envelope.warnings.is_empty());
+    assert!(envelope.provenance.is_empty());
 }
 
 #[tokio::test]
-async fn forecast_endpoint_appends_injected_advisory_signals() {
+async fn advisory_forecast_signal_endpoints_list_get_and_forecast_provenance_roundtrip() {
     let tmp = tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     let db_path = data_dir.join("tfk.db");
@@ -153,6 +154,7 @@ async fn forecast_endpoint_appends_injected_advisory_signals() {
         tfk_api::router_with_state(tfk_api::ApiState::new(store).with_forecast_client(client));
 
     let response = app
+        .clone()
         .oneshot(json_request("POST", "/v1/forecast", &forecast_request()))
         .await
         .unwrap();
@@ -164,13 +166,98 @@ async fn forecast_endpoint_appends_injected_advisory_signals() {
     assert_eq!(result.advisory_signals.len(), 1);
     assert_eq!(result.advisory_signals[0].name, "forming_future_risk");
     assert!(envelope.warnings.is_empty());
+    assert_eq!(envelope.provenance.len(), 1);
+    assert_eq!(envelope.provenance[0].kind, "advisory_forecast_signal");
+    assert!(envelope.provenance[0].id.starts_with("advisory_signal_"));
+
+    let list_response = app
+        .clone()
+        .oneshot(empty_request("GET", "/v1/advisory-forecast-signals"))
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_envelope: ApiEnvelope<Vec<StoredAdvisoryForecastSignal>> =
+        read_json(list_response).await;
+    assert!(list_envelope.ok);
+    let listed = list_envelope.data.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, envelope.provenance[0].id);
+    assert_eq!(listed[0].name, "forming_future_risk");
+    assert_eq!(listed[0].confidence, 0.8);
+    assert_eq!(listed[0].model, "static-test");
+
+    let get_response = app
+        .oneshot(empty_request(
+            "GET",
+            &format!(
+                "/v1/advisory-forecast-signals/{}",
+                envelope.provenance[0].id
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_envelope: ApiEnvelope<StoredAdvisoryForecastSignal> = read_json(get_response).await;
+    assert!(get_envelope.ok);
+    assert_eq!(get_envelope.data.unwrap(), listed[0]);
 
     let reopened = Store::open(&db_path, &archive_dir).unwrap();
     let stored = reopened.list_advisory_forecast_signals().unwrap();
-    assert_eq!(stored.len(), 1);
-    assert_eq!(stored[0].name, "forming_future_risk");
-    assert_eq!(stored[0].confidence, 0.8);
-    assert_eq!(stored[0].model, "static-test");
+    assert_eq!(stored, listed);
+}
+
+#[tokio::test]
+async fn advisory_forecast_signal_get_missing_returns_404_envelope() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+
+    let response = app
+        .oneshot(empty_request(
+            "GET",
+            "/v1/advisory-forecast-signals/missing-signal",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let envelope: ApiEnvelope<serde_json::Value> = read_json(response).await;
+    assert!(!envelope.ok);
+    assert!(envelope.data.is_none());
+    assert!(envelope.provenance.is_empty());
+    assert!(envelope
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("advisory forecast signal not found")));
+}
+
+#[tokio::test]
+async fn advisory_forecast_signal_empty_client_leaves_provenance_empty() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let db_path = data_dir.join("tfk.db");
+    let archive_dir = data_dir.join("archive");
+    let store = Store::open(&db_path, &archive_dir).unwrap();
+    let client = StaticForecastClient::new(Vec::new());
+    let app =
+        tfk_api::router_with_state(tfk_api::ApiState::new(store).with_forecast_client(client));
+
+    let response = app
+        .oneshot(json_request("POST", "/v1/forecast", &forecast_request()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<ForecastResult> = read_json(response).await;
+    assert!(envelope.data.unwrap().advisory_signals.is_empty());
+    assert!(envelope.warnings.is_empty());
+    assert!(envelope.provenance.is_empty());
+
+    let reopened = Store::open(&db_path, &archive_dir).unwrap();
+    assert!(reopened
+        .list_advisory_forecast_signals()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -227,6 +314,7 @@ async fn forecast_endpoint_without_client_does_not_store_advisory_signals() {
     assert_eq!(response.status(), StatusCode::OK);
     let envelope: ApiEnvelope<ForecastResult> = read_json(response).await;
     assert!(envelope.data.unwrap().advisory_signals.is_empty());
+    assert!(envelope.provenance.is_empty());
 
     let reopened = Store::open(&db_path, &archive_dir).unwrap();
     assert!(reopened

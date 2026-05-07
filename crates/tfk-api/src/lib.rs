@@ -15,7 +15,9 @@ use tfk_protocol::{
     PreflightSignals, ProvenanceRef, RawEventInput, StoredCommitment, StoredContinuation,
     TemporalDeltaInput,
 };
-use tfk_store::{Store, StoreError, StoredRawEvent, StoredTemporalDelta};
+use tfk_store::{
+    Store, StoreError, StoredAdvisoryForecastSignal, StoredRawEvent, StoredTemporalDelta,
+};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -65,6 +67,14 @@ pub fn router_with_state(state: ApiState) -> Router {
         .route("/v1/preflight", post(preflight_handler))
         .route("/v1/lens", post(lens_handler))
         .route("/v1/forecast", post(forecast_handler))
+        .route(
+            "/v1/advisory-forecast-signals",
+            get(list_advisory_forecast_signals_handler),
+        )
+        .route(
+            "/v1/advisory-forecast-signals/:id",
+            get(get_advisory_forecast_signal_handler),
+        )
         .route("/v1/commit", post(commit_handler))
         .route("/v1/commitments", get(list_commitments_handler))
         .route("/v1/assimilate", post(assimilate_handler))
@@ -206,6 +216,7 @@ async fn forecast_handler(
 ) -> Json<ApiEnvelope<ForecastResult>> {
     let mut result = state.forecast_scorer.score(&request);
     let mut warnings = Vec::new();
+    let mut provenance = Vec::new();
 
     if let Some(client) = &state.forecast_client {
         match client.forecast(&request) {
@@ -218,13 +229,18 @@ async fn forecast_handler(
                         .and_then(|store| {
                             store
                                 .record_advisory_forecast_signals(&signals)
-                                .map(|_| ())
                                 .map_err(|error| error.to_string())
                         });
-                    if let Err(error) = persist_result {
-                        warnings.push(format!(
+                    match persist_result {
+                        Ok(stored_signals) => {
+                            provenance.extend(stored_signals.into_iter().map(|signal| ProvenanceRef {
+                                kind: "advisory_forecast_signal".to_string(),
+                                id: signal.id,
+                            }));
+                        }
+                        Err(error) => warnings.push(format!(
                             "forecast advisory signals were not persisted; deterministic result returned: {error}"
-                        ));
+                        )),
                     }
                 }
                 result.advisory_signals.extend(signals);
@@ -237,8 +253,45 @@ async fn forecast_handler(
 
     let mut envelope = ApiEnvelope::ok("local-forecast", "local-forecast", result);
     envelope.warnings = warnings;
+    envelope.provenance = provenance;
 
     Json(envelope)
+}
+
+async fn list_advisory_forecast_signals_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<ApiEnvelope<Vec<StoredAdvisoryForecastSignal>>>, ApiError> {
+    let signals = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .list_advisory_forecast_signals()
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-advisory-forecast-signal-list",
+        "local-advisory-forecast-signal-list",
+        signals,
+    )))
+}
+
+async fn get_advisory_forecast_signal_handler(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiEnvelope<StoredAdvisoryForecastSignal>>, ApiError> {
+    let signal = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .get_advisory_forecast_signal(&id)
+        .map_err(|error| internal_error(error.to_string()))?
+        .ok_or_else(|| not_found_error(format!("advisory forecast signal not found: {id}")))?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-advisory-forecast-signal-get",
+        "local-advisory-forecast-signal-get",
+        signal,
+    )))
 }
 
 async fn commit_handler(
