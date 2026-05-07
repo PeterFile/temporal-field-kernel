@@ -370,6 +370,117 @@ fn continuation_relations_roundtrip_and_reopen() {
 }
 
 #[test]
+fn duplicate_continuation_relation_create_is_idempotent() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let left = create_test_continuation(
+        &store,
+        "duplicate relation left",
+        ContinuationStatus::Active,
+    );
+    let right = create_test_continuation(
+        &store,
+        "duplicate relation right",
+        ContinuationStatus::Active,
+    );
+    let relation = ContinuationRelationEdge {
+        from_id: left.id,
+        to_id: right.id,
+        kind: ContinuationRelationKind::Blocks,
+        reason: Some("first reason is preserved".to_string()),
+    };
+    let duplicate = ContinuationRelationEdge {
+        reason: Some("new reason must not overwrite".to_string()),
+        ..relation.clone()
+    };
+
+    assert_eq!(
+        store.create_continuation_relation(&relation).unwrap(),
+        relation
+    );
+    assert_eq!(
+        store.create_continuation_relation(&duplicate).unwrap(),
+        relation
+    );
+    assert_eq!(store.list_continuation_relations().unwrap(), vec![relation]);
+}
+
+#[test]
+fn opening_legacy_db_deduplicates_continuation_relations_and_enforces_unique_edge() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let db_path = data_dir.join("tfk.db");
+    let archive_dir = data_dir.join("archive");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE continuations (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              continuation_type TEXT NOT NULL DEFAULT 'narrative',
+              status TEXT NOT NULL,
+              parent_id TEXT,
+              raw_event_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE continuation_relations (
+              from_id TEXT NOT NULL REFERENCES continuations(id),
+              to_id TEXT NOT NULL REFERENCES continuations(id),
+              kind TEXT NOT NULL,
+              reason TEXT,
+              created_at TEXT NOT NULL
+            );
+            INSERT INTO continuations (
+              id, title, summary, continuation_type, status, parent_id, raw_event_id, created_at, updated_at
+            ) VALUES
+              ('cont_legacy_left', 'left', 'legacy relation endpoint', 'obligation', 'active', NULL, NULL,
+               '2026-05-02T00:00:00Z', '2026-05-02T00:00:00Z'),
+              ('cont_legacy_right', 'right', 'legacy relation endpoint', 'obligation', 'active', NULL, NULL,
+               '2026-05-02T00:00:00Z', '2026-05-02T00:00:00Z');
+            INSERT INTO continuation_relations (from_id, to_id, kind, reason, created_at) VALUES
+              ('cont_legacy_left', 'cont_legacy_right', 'blocks', 'first legacy reason', '2026-05-02T00:00:00Z'),
+              ('cont_legacy_left', 'cont_legacy_right', 'blocks', 'second legacy reason', '2026-05-02T00:01:00Z');
+            "#,
+        )
+        .unwrap();
+    }
+
+    let expected = ContinuationRelationEdge {
+        from_id: "cont_legacy_left".to_string(),
+        to_id: "cont_legacy_right".to_string(),
+        kind: ContinuationRelationKind::Blocks,
+        reason: Some("first legacy reason".to_string()),
+    };
+    {
+        let store = Store::open(&db_path, &archive_dir).unwrap();
+
+        assert_eq!(store.list_continuation_relations().unwrap(), vec![expected]);
+    }
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let relation_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM continuation_relations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(relation_count, 1);
+    let error = conn
+        .execute(
+            "INSERT INTO continuation_relations (from_id, to_id, kind, reason, created_at)
+             VALUES ('cont_legacy_left', 'cont_legacy_right', 'blocks', 'third legacy reason',
+                     '2026-05-02T00:02:00Z')",
+            [],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("UNIQUE constraint failed"));
+}
+
+#[test]
 fn active_continuation_relations_filter_non_active_endpoints() {
     let tmp = tempdir().unwrap();
     let mut store = open_test_store(tmp.path());

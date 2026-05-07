@@ -454,19 +454,34 @@ impl Store {
     ) -> Result<ContinuationRelationEdge> {
         let kind = continuation_relation_kind_to_string(relation.kind)?;
         let now = now_rfc3339()?;
-        self.conn.execute(
-            "INSERT INTO continuation_relations (
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO continuation_relations (
                 from_id, to_id, kind, reason, created_at
              ) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 &relation.from_id,
                 &relation.to_id,
-                kind,
+                &kind,
                 &relation.reason,
                 now,
             ],
         )?;
-        Ok(relation.clone())
+        if inserted == 1 {
+            return Ok(relation.clone());
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT from_id, to_id, kind, reason
+             FROM continuation_relations
+             WHERE from_id = ?1 AND to_id = ?2 AND kind = ?3
+             ORDER BY created_at, rowid
+             LIMIT 1",
+        )?;
+        stmt.query_row(
+            params![&relation.from_id, &relation.to_id, &kind],
+            row_to_continuation_relation_fields,
+        )?
+        .into_edge()
     }
 
     pub fn list_continuation_relations(&self) -> Result<Vec<ContinuationRelationEdge>> {
@@ -1087,6 +1102,25 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    deduplicate_continuation_relations(conn)?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_continuation_relations_from_to_kind
+         ON continuation_relations(from_id, to_id, kind)",
+        [],
+    )?;
+    Ok(())
+}
+
+fn deduplicate_continuation_relations(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM continuation_relations
+         WHERE rowid NOT IN (
+             SELECT MIN(rowid)
+             FROM continuation_relations
+             GROUP BY from_id, to_id, kind
+         )",
+        [],
+    )?;
     Ok(())
 }
 
