@@ -39,7 +39,8 @@ impl TimeFieldLensEngine {
             .filter(|continuation| !is_closed(continuation.status))
             .filter_map(|continuation| active_continuation_for(continuation, request))
             .collect();
-        active.sort_by(|left, right| right.activation.total_cmp(&left.activation));
+        apply_relation_kind_activation(&mut active, relations);
+        sort_active_continuations(&mut active);
         let temporal_debt = temporal_debt(&active);
 
         if active.is_empty() {
@@ -108,6 +109,44 @@ impl TimeFieldLensEngine {
             }
         }
     }
+}
+
+fn apply_relation_kind_activation(
+    active: &mut [LensActiveContinuation],
+    relations: &[ContinuationRelationEdge],
+) {
+    for relation in relations {
+        match relation.kind {
+            ContinuationRelationKind::Supports => {
+                scale_activation(active, &relation.to_id, 1.10);
+            }
+            ContinuationRelationKind::DependsOn => {
+                scale_activation(active, &relation.to_id, 1.15);
+                scale_activation(active, &relation.from_id, 0.95);
+            }
+            ContinuationRelationKind::Subsumes => {
+                scale_activation(active, &relation.from_id, 1.15);
+                scale_activation(active, &relation.to_id, 0.95);
+            }
+            ContinuationRelationKind::Conflicts | ContinuationRelationKind::Blocks => {}
+        }
+    }
+}
+
+fn scale_activation(active: &mut [LensActiveContinuation], id: &str, factor: f64) {
+    if let Some(continuation) = active.iter_mut().find(|continuation| continuation.id == id) {
+        continuation.activation *= factor;
+    }
+}
+
+fn sort_active_continuations(active: &mut [LensActiveContinuation]) {
+    active.sort_by(|left, right| {
+        right
+            .activation
+            .total_cmp(&left.activation)
+            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| left.title.cmp(&right.title))
+    });
 }
 
 fn relation_boundaries(
