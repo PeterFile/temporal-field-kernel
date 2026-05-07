@@ -720,6 +720,130 @@ async fn lens_uses_persisted_active_continuation_relations() {
 }
 
 #[tokio::test]
+async fn lens_orders_active_continuations_by_persisted_relation_kind_ranking() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let baseline = create_obligation_via_api(
+        &app,
+        "relation ranking baseline action",
+        "relation ranking baseline action keeps the unmodified activation floor",
+    )
+    .await;
+    let supported = create_obligation_via_api(
+        &app,
+        "relation ranking supported action",
+        "relation ranking supported action should rise above the baseline",
+    )
+    .await;
+    let prerequisite = create_obligation_via_api(
+        &app,
+        "relation ranking prerequisite action",
+        "relation ranking prerequisite action receives support and dependency pressure",
+    )
+    .await;
+    let dependent = create_obligation_via_api(&app, "relation ranking dependent action", "").await;
+    let umbrella = create_obligation_via_api(
+        &app,
+        "relation ranking umbrella action",
+        "relation ranking umbrella action should outrank the supported-only path",
+    )
+    .await;
+    let child = create_obligation_via_api(
+        &app,
+        "relation ranking child action",
+        "relation ranking child action is intentionally lower than the baseline",
+    )
+    .await;
+
+    create_relation_via_api(
+        &app,
+        ContinuationRelationEdge {
+            from_id: baseline.id.clone(),
+            to_id: supported.id.clone(),
+            kind: ContinuationRelationKind::Supports,
+            reason: Some("support-only relation should lift the target continuation".to_string()),
+        },
+    )
+    .await;
+    create_relation_via_api(
+        &app,
+        ContinuationRelationEdge {
+            from_id: supported.id.clone(),
+            to_id: prerequisite.id.clone(),
+            kind: ContinuationRelationKind::Supports,
+            reason: Some("support composes with dependency pressure on the target".to_string()),
+        },
+    )
+    .await;
+    create_relation_via_api(
+        &app,
+        ContinuationRelationEdge {
+            from_id: dependent.id.clone(),
+            to_id: prerequisite.id.clone(),
+            kind: ContinuationRelationKind::DependsOn,
+            reason: Some(
+                "dependency should prioritize the prerequisite over the dependent".to_string(),
+            ),
+        },
+    )
+    .await;
+    create_relation_via_api(
+        &app,
+        ContinuationRelationEdge {
+            from_id: umbrella.id.clone(),
+            to_id: child.id.clone(),
+            kind: ContinuationRelationKind::Subsumes,
+            reason: Some("subsuming parent should outrank the child it absorbs".to_string()),
+        },
+    )
+    .await;
+
+    let lens_response = app
+        .oneshot(json_request(
+            "POST",
+            "/v1/lens",
+            &LensRequest {
+                query: "relation ranking".to_string(),
+                horizon: Vec::new(),
+                perspective: vec!["action".to_string()],
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(lens_response.status(), StatusCode::OK);
+    let lens_envelope: ApiEnvelope<LensCard> = read_json(lens_response).await;
+    assert!(lens_envelope.ok);
+    let card = lens_envelope.data.unwrap();
+    assert_eq!(card.stance, "act");
+    assert!(card.boundaries.is_empty());
+    assert_eq!(card.active_continuations.len(), 6);
+    let ordered_titles: Vec<_> = card
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.title.as_str())
+        .collect();
+    assert_eq!(
+        ordered_titles,
+        vec![
+            "relation ranking prerequisite action",
+            "relation ranking umbrella action",
+            "relation ranking supported action",
+            "relation ranking baseline action",
+            "relation ranking child action",
+            "relation ranking dependent action",
+        ]
+    );
+    assert_eq!(card.active_continuations[0].id, prerequisite.id);
+    assert!(card.active_continuations[0].activation > card.active_continuations[1].activation);
+    assert!(card.active_continuations[1].activation > card.active_continuations[2].activation);
+    assert!(card.active_continuations[2].activation > card.active_continuations[3].activation);
+    assert!(card.active_continuations[3].activation > card.active_continuations[4].activation);
+    assert!(card.active_continuations[4].activation > card.active_continuations[5].activation);
+}
+
+#[tokio::test]
 async fn lens_projects_active_continuation_as_time_field_action_constraint() {
     let tmp = tempdir().unwrap();
     let store = open_test_store(tmp.path());
@@ -1068,6 +1192,14 @@ fn open_test_store(root: &std::path::Path) -> Store {
 }
 
 async fn create_continuation_via_api(app: &axum::Router, title: &str) -> StoredContinuation {
+    create_obligation_via_api(app, title, "relation test summary").await
+}
+
+async fn create_obligation_via_api(
+    app: &axum::Router,
+    title: &str,
+    summary: &str,
+) -> StoredContinuation {
     let response = app
         .clone()
         .oneshot(json_request(
@@ -1075,7 +1207,7 @@ async fn create_continuation_via_api(app: &axum::Router, title: &str) -> StoredC
             "/v1/continuations",
             &ContinuationInput {
                 title: title.to_string(),
-                summary: "relation test summary".to_string(),
+                summary: summary.to_string(),
                 continuation_type: ContinuationType::Obligation,
                 status: ContinuationStatus::Active,
                 parent_id: None,
@@ -1084,7 +1216,28 @@ async fn create_continuation_via_api(app: &axum::Router, title: &str) -> StoredC
         ))
         .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
     let envelope: ApiEnvelope<StoredContinuation> = read_json(response).await;
+    assert!(envelope.ok);
+    envelope.data.unwrap()
+}
+
+async fn create_relation_via_api(
+    app: &axum::Router,
+    relation: ContinuationRelationEdge,
+) -> ContinuationRelationEdge {
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/continuation-relations",
+            &relation,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<ContinuationRelationEdge> = read_json(response).await;
+    assert!(envelope.ok);
     envelope.data.unwrap()
 }
 
