@@ -74,6 +74,20 @@ pub struct RelationBoundaryReplaySummary {
     pub ok: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelationRankingReplaySummary {
+    pub fixture_path: String,
+    pub continuation_count: usize,
+    pub relation_count: usize,
+    pub expected_top_title: String,
+    pub actual_top_title: String,
+    pub actual_top_id: String,
+    pub expected_ordered_titles: Vec<String>,
+    pub actual_ordered_ids: Vec<String>,
+    pub actual_ordered_titles: Vec<String>,
+    pub ok: bool,
+}
+
 pub fn load_fixture_events(path: &Path) -> anyhow::Result<Vec<RawEventInput>> {
     let file =
         File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
@@ -434,6 +448,80 @@ pub fn replay_relation_boundary_fixture(
     })
 }
 
+pub fn replay_relation_ranking_fixture(
+    path: &Path,
+) -> anyhow::Result<RelationRankingReplaySummary> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
+    let fixture: RelationRankingFixture = serde_json::from_reader(file)
+        .with_context(|| format!("invalid fixture {}", path.display()))?;
+    let tmp = tempfile::tempdir().context("failed to create relation-ranking temp directory")?;
+    let data_dir = tmp.path().join("store");
+    let store = Store::open(data_dir.join("tfk.db"), data_dir.join("archive"))
+        .context("failed to open relation-ranking store")?;
+
+    let continuation_count = fixture.continuations.len();
+    let relation_count = fixture.relations.len();
+    let mut continuation_ids = HashMap::new();
+    for continuation in &fixture.continuations {
+        let stored = store
+            .create_continuation(&continuation.input)
+            .with_context(|| format!("failed to create continuation {}", continuation.label))?;
+        continuation_ids.insert(continuation.label.clone(), stored.id);
+    }
+
+    for relation in &fixture.relations {
+        let from_id = continuation_ids
+            .get(&relation.from)
+            .with_context(|| format!("unknown relation from label {}", relation.from))?
+            .clone();
+        let to_id = continuation_ids
+            .get(&relation.to)
+            .with_context(|| format!("unknown relation to label {}", relation.to))?
+            .clone();
+        store
+            .create_continuation_relation(&ContinuationRelationEdge {
+                from_id,
+                to_id,
+                kind: relation.kind,
+                reason: relation.reason.clone(),
+            })
+            .context("failed to create continuation relation")?;
+    }
+
+    let card =
+        lens_from_store(&store, &fixture.lens).context("failed to run relation-ranking lens")?;
+    let actual_ordered_ids: Vec<_> = card
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.id.clone())
+        .collect();
+    let actual_ordered_titles: Vec<_> = card
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.title.clone())
+        .collect();
+    let actual_top_title = actual_ordered_titles.first().cloned().unwrap_or_default();
+    let actual_top_id = actual_ordered_ids.first().cloned().unwrap_or_default();
+    let expected_top_title = fixture.expected.top_title;
+    let expected_ordered_titles = fixture.expected.ordered_titles;
+    let ok =
+        actual_top_title == expected_top_title && actual_ordered_titles == expected_ordered_titles;
+
+    Ok(RelationRankingReplaySummary {
+        fixture_path: path.to_string_lossy().to_string(),
+        continuation_count,
+        relation_count,
+        expected_top_title,
+        actual_top_title,
+        actual_top_id,
+        expected_ordered_titles,
+        actual_ordered_ids,
+        actual_ordered_titles,
+        ok,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct ForecastFixture {
     request: ForecastRequest,
@@ -535,6 +623,34 @@ struct RelationBoundaryExpected {
     after_boundary_kinds: Vec<String>,
     after_active_continuation_count: usize,
     after_stance: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelationRankingFixture {
+    continuations: Vec<RelationRankingContinuation>,
+    relations: Vec<RelationRankingRelation>,
+    lens: LensRequest,
+    expected: RelationRankingExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelationRankingContinuation {
+    label: String,
+    input: tfk_protocol::ContinuationInput,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelationRankingRelation {
+    from: String,
+    to: String,
+    kind: ContinuationRelationKind,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RelationRankingExpected {
+    top_title: String,
+    ordered_titles: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

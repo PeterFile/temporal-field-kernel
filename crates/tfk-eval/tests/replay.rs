@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use tfk_eval::{
     load_fixture_events, replay_action_loop_fixture, replay_fixture, replay_forecast_fixture,
     replay_lens_linked_raw_event_fixture, replay_relation_boundary_fixture,
+    replay_relation_ranking_fixture,
 };
 use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{AdvisoryForecastSignal, EventSource, EvidenceStatus, ForecastRequest};
@@ -42,6 +43,11 @@ fn lens_linked_raw_event_fixture_path() -> PathBuf {
 fn relation_boundary_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/temporalbench/relation_boundary/basic.json")
+}
+
+fn relation_ranking_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/relation_ranking/basic.json")
 }
 
 #[test]
@@ -377,6 +383,77 @@ fn relation_boundary_cli_prints_structured_json_summary() {
     assert_eq!(value["after_boundary_kinds"].as_array().unwrap().len(), 0);
     assert_eq!(value["after_active_continuation_count"], 1);
     assert_eq!(value["after_stance"], "act");
+    assert_eq!(value["ok"], true);
+}
+
+#[test]
+fn relation_ranking_replay_checks_relation_kind_weighted_order() {
+    let summary = replay_relation_ranking_fixture(&relation_ranking_fixture_path()).unwrap();
+
+    let expected_titles = vec![
+        "relation ranking prerequisite action".to_string(),
+        "relation ranking umbrella action".to_string(),
+        "relation ranking supported action".to_string(),
+        "relation ranking baseline action".to_string(),
+        "relation ranking child action".to_string(),
+        "relation ranking dependent action".to_string(),
+    ];
+    assert_eq!(summary.continuation_count, 6);
+    assert_eq!(summary.relation_count, 4);
+    assert_eq!(summary.expected_top_title, expected_titles[0]);
+    assert_eq!(summary.actual_top_title, expected_titles[0]);
+    assert_eq!(summary.expected_ordered_titles, expected_titles);
+    assert_eq!(summary.actual_ordered_titles, expected_titles);
+    assert_eq!(summary.actual_ordered_ids.len(), 6);
+    assert!(summary
+        .actual_ordered_ids
+        .iter()
+        .all(|id| id.starts_with("cont_")));
+    assert!(summary.ok);
+}
+
+#[test]
+fn relation_ranking_cli_prints_structured_json_summary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tfk-eval"))
+        .args([
+            "relation-ranking",
+            "--fixture",
+            relation_ranking_fixture_path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["continuation_count"], 6);
+    assert_eq!(value["relation_count"], 4);
+    assert_eq!(
+        value["expected_top_title"],
+        "relation ranking prerequisite action"
+    );
+    assert_eq!(
+        value["actual_top_title"],
+        "relation ranking prerequisite action"
+    );
+    assert_eq!(value["actual_ordered_titles"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        value["actual_ordered_titles"][1],
+        "relation ranking umbrella action"
+    );
+    assert_eq!(
+        value["actual_ordered_titles"][2],
+        "relation ranking supported action"
+    );
+    assert!(value["actual_top_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("cont_"));
+    assert_eq!(value["actual_ordered_ids"].as_array().unwrap().len(), 6);
     assert_eq!(value["ok"], true);
 }
 
