@@ -523,13 +523,25 @@ async fn lens_handler(
             0,
         )
     };
+    let mut commitment_provenance = Vec::new();
     if !commitment_constraints.is_empty() {
+        for commitment in &commitment_constraints {
+            if !commitment_provenance
+                .iter()
+                .any(|provenance: &ProvenanceRef| provenance.id.as_str() == commitment.id.as_str())
+            {
+                commitment_provenance.push(ProvenanceRef {
+                    kind: "commitment".to_string(),
+                    id: commitment.id.clone(),
+                });
+            }
+        }
         card.commitment_constraints = commitment_constraints;
         card.avoid
             .push("do not violate explicit commitment constraints".to_string());
     }
     let mut envelope = ApiEnvelope::ok("local-lens", "local-lens", card);
-    envelope.provenance = if continuations.is_empty() {
+    let mut provenance: Vec<ProvenanceRef> = if continuations.is_empty() {
         events
             .into_iter()
             .map(|event| ProvenanceRef {
@@ -546,6 +558,8 @@ async fn lens_handler(
             })
             .collect()
     };
+    provenance.extend(commitment_provenance);
+    envelope.provenance = provenance;
 
     Ok(Json(envelope))
 }
