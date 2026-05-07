@@ -8,7 +8,7 @@ use tfk_protocol::{
     ContinuationRelationEdge, ContinuationRelationKind, ContinuationStatus,
     ContinuationStatusDelta, ContinuationType, EventSource, RawEventInput, TemporalDeltaInput,
 };
-use tfk_store::Store;
+use tfk_store::{Store, StoreError};
 use tfk_vector::{
     VectorDocument, VectorDocumentKind, VectorError, VectorHit, VectorIndex, VectorIndexOutcome,
     VectorIndexStatus,
@@ -725,6 +725,197 @@ fn commitment_create_reopen_and_active_filtering_uses_linked_continuation_status
 }
 
 #[test]
+fn close_delta_marks_linked_commitment_closed_and_not_active() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_test_store(tmp.path());
+    let continuation = create_test_continuation(
+        &store,
+        "close linked commitment",
+        ContinuationStatus::Active,
+    );
+    let commitment = create_test_commitment(&store, &continuation.id, false);
+
+    store
+        .assimilate_delta(&TemporalDeltaInput {
+            action_id: "a-close-commitment".to_string(),
+            changes: vec![ContinuationStatusDelta {
+                continuation_id: continuation.id.clone(),
+                delta: ContinuationDelta::Close,
+            }],
+            claims_made: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .unwrap();
+
+    let stored = store.get_commitment(&commitment.id).unwrap().unwrap();
+    assert_eq!(stored.status, ContinuationStatus::Closed);
+    assert!(store.list_active_commitments().unwrap().is_empty());
+}
+
+#[test]
+fn close_then_activate_does_not_reopen_completed_commitment() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_test_store(tmp.path());
+    let continuation =
+        create_test_continuation(&store, "close then activate", ContinuationStatus::Active);
+    let commitment = create_test_commitment(&store, &continuation.id, false);
+
+    store
+        .assimilate_delta(&TemporalDeltaInput {
+            action_id: "a-close-before-activate".to_string(),
+            changes: vec![ContinuationStatusDelta {
+                continuation_id: continuation.id.clone(),
+                delta: ContinuationDelta::Close,
+            }],
+            claims_made: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .unwrap();
+    store
+        .assimilate_delta(&TemporalDeltaInput {
+            action_id: "a-reactivate-continuation".to_string(),
+            changes: vec![ContinuationStatusDelta {
+                continuation_id: continuation.id.clone(),
+                delta: ContinuationDelta::Activate,
+            }],
+            claims_made: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .unwrap();
+
+    let stored = store.get_commitment(&commitment.id).unwrap().unwrap();
+    assert_eq!(stored.status, ContinuationStatus::Closed);
+    assert!(store.list_active_commitments().unwrap().is_empty());
+}
+
+#[test]
+fn retire_delta_releases_revocable_commitment() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_test_store(tmp.path());
+    let continuation =
+        create_test_continuation(&store, "retire revocable", ContinuationStatus::Active);
+    let commitment = create_test_commitment(&store, &continuation.id, true);
+
+    store
+        .assimilate_delta(&TemporalDeltaInput {
+            action_id: "a-retire-revocable".to_string(),
+            changes: vec![ContinuationStatusDelta {
+                continuation_id: continuation.id.clone(),
+                delta: ContinuationDelta::Retire,
+            }],
+            claims_made: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .unwrap();
+
+    let stored = store.get_commitment(&commitment.id).unwrap().unwrap();
+    assert_eq!(stored.status, ContinuationStatus::Retired);
+    assert!(store.list_active_commitments().unwrap().is_empty());
+}
+
+#[test]
+fn retire_delta_rejects_nonrevocable_commitment_and_rolls_back() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_test_store(tmp.path());
+    let continuation =
+        create_test_continuation(&store, "retire nonrevocable", ContinuationStatus::Active);
+    let commitment = create_test_commitment(&store, &continuation.id, false);
+
+    let error = store
+        .assimilate_delta(&TemporalDeltaInput {
+            action_id: "a-retire-nonrevocable".to_string(),
+            changes: vec![ContinuationStatusDelta {
+                continuation_id: continuation.id.clone(),
+                delta: ContinuationDelta::Retire,
+            }],
+            claims_made: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .unwrap_err();
+
+    assert!(matches!(error, StoreError::InvalidTemporalDelta(_)));
+    assert!(store.list_temporal_deltas().unwrap().is_empty());
+    let unchanged_continuation = store.get_continuation(&continuation.id).unwrap().unwrap();
+    assert_eq!(unchanged_continuation.status, ContinuationStatus::Active);
+    let unchanged_commitment = store.get_commitment(&commitment.id).unwrap().unwrap();
+    assert_eq!(unchanged_commitment.status, ContinuationStatus::Active);
+}
+
+#[test]
+fn close_then_retire_rejects_original_nonrevocable_commitment_and_rolls_back() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_test_store(tmp.path());
+    let continuation = create_test_continuation(
+        &store,
+        "close then retire nonrevocable",
+        ContinuationStatus::Active,
+    );
+    let commitment = create_test_commitment(&store, &continuation.id, false);
+
+    let error = store
+        .assimilate_delta(&TemporalDeltaInput {
+            action_id: "a-close-then-retire-nonrevocable".to_string(),
+            changes: vec![
+                ContinuationStatusDelta {
+                    continuation_id: continuation.id.clone(),
+                    delta: ContinuationDelta::Close,
+                },
+                ContinuationStatusDelta {
+                    continuation_id: continuation.id.clone(),
+                    delta: ContinuationDelta::Retire,
+                },
+            ],
+            claims_made: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .unwrap_err();
+
+    assert!(matches!(error, StoreError::InvalidTemporalDelta(_)));
+    assert!(store.list_temporal_deltas().unwrap().is_empty());
+    let unchanged_continuation = store.get_continuation(&continuation.id).unwrap().unwrap();
+    assert_eq!(unchanged_continuation.status, ContinuationStatus::Active);
+    let unchanged_commitment = store.get_commitment(&commitment.id).unwrap().unwrap();
+    assert_eq!(unchanged_commitment.status, ContinuationStatus::Active);
+}
+
+#[test]
+fn duplicate_status_deltas_for_same_continuation_are_rejected_and_rolled_back() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_test_store(tmp.path());
+    let continuation = create_test_continuation(
+        &store,
+        "duplicate lifecycle target",
+        ContinuationStatus::Active,
+    );
+    let commitment = create_test_commitment(&store, &continuation.id, false);
+
+    let error = store
+        .assimilate_delta(&TemporalDeltaInput {
+            action_id: "a-close-then-activate".to_string(),
+            changes: vec![
+                ContinuationStatusDelta {
+                    continuation_id: continuation.id.clone(),
+                    delta: ContinuationDelta::Close,
+                },
+                ContinuationStatusDelta {
+                    continuation_id: continuation.id.clone(),
+                    delta: ContinuationDelta::Activate,
+                },
+            ],
+            claims_made: Vec::new(),
+            evidence: Vec::new(),
+        })
+        .unwrap_err();
+
+    assert!(matches!(error, StoreError::InvalidTemporalDelta(_)));
+    assert!(store.list_temporal_deltas().unwrap().is_empty());
+    let unchanged_continuation = store.get_continuation(&continuation.id).unwrap().unwrap();
+    assert_eq!(unchanged_continuation.status, ContinuationStatus::Active);
+    let unchanged_commitment = store.get_commitment(&commitment.id).unwrap().unwrap();
+    assert_eq!(unchanged_commitment.status, ContinuationStatus::Active);
+}
+
+#[test]
 fn temporal_delta_maps_supported_assimilation_deltas_to_statuses() {
     let tmp = tempdir().unwrap();
     let mut store = open_test_store(tmp.path());
@@ -914,6 +1105,25 @@ fn create_test_continuation(
             parent_id: None,
             raw_event_id: None,
         })
+        .unwrap()
+}
+
+fn create_test_commitment(
+    store: &Store,
+    continuation_id: &str,
+    revocable: bool,
+) -> tfk_protocol::StoredCommitment {
+    store
+        .create_commitment(
+            &CommitRequest {
+                speaker: "agent".to_string(),
+                statement: "finish the linked work".to_string(),
+                scope: Some("test".to_string()),
+                deadline: None,
+                revocable,
+            },
+            continuation_id,
+        )
         .unwrap()
 }
 
