@@ -1,0 +1,67 @@
+{
+  "commitment": {
+    "speaker": "agent",
+    "statement": "do not ship irreversible release until rollback evidence is verified",
+    "scope": "temporalbench/forecast-commitment",
+    "deadline": "2026-05-07",
+    "revocable": false
+  },
+  "forecast": {
+    "actions": [
+      {
+        "name": "ship irreversible release",
+        "continuation_id": null,
+        "progress": 1.0,
+        "closure": 0.9,
+        "option_value_preserved": 0.6,
+        "risk": 0.2,
+        "irreversibility": 0.6,
+        "confusion": 0.1,
+        "friction": 0.1,
+        "temporal_debt_added": 0.1,
+        "uncertainty": 0.4,
+        "externality": 0.4
+      },
+      {
+        "name": "verify rollback evidence",
+        "continuation_id": null,
+        "progress": 0.6,
+        "closure": 0.2,
+        "option_value_preserved": 0.8,
+        "risk": 0.05,
+        "irreversibility": 0.1,
+        "confusion": 0.1,
+        "friction": 0.2,
+        "temporal_debt_added": 0.0,
+        "uncertainty": 0.2,
+        "externality": 0.1
+      },
+      {
+        "name": "prepare release notes",
+        "continuation_id": null,
+        "progress": 0.4,
+        "closure": 0.3,
+        "option_value_preserved": 0.6,
+        "risk": 0.05,
+        "irreversibility": 0.05,
+        "confusion": 0.1,
+        "friction": 0.2,
+        "temporal_debt_added": 0.0,
+        "uncertainty": 0.2,
+        "externality": 0.1
+      }
+    ],
+    "relations": []
+  },
+  "commitment_action_names": [
+    "ship irreversible release",
+    "verify rollback evidence"
+  ],
+  "expected": {
+    "commitment_constraint_count": 1,
+    "commitment_bound_action_count": 2,
+    "top_action": "verify rollback evidence",
+    "constrained_action": "ship irreversible release",
+    "constrained_action_requires_confirmation": true
+  }
+}
