@@ -46,7 +46,7 @@ The current implementation is contract-level and local-first. It includes:
 - structured commitment capture/list support and lens constraints
 - deterministic preflight and forecast scoring for path-choice confirmation
 - optional static/stdio forecast advisory model client
-- persisted advisory forecast signals with API and CLI list/get flows
+- persisted advisory forecast signals with API/CLI list/get flows and deterministic lens projection/filtering
 - action-loop assimilate support
 - local UDS/HTTP API, thin MCP wrapper, and CLI adapter surface
 - TemporalBench runner for replaying fixtures against time-field behavior
@@ -57,5 +57,4 @@ The kernel does not schedule work, own user workflows, provide a UI, or act as a
 
 - Extend lens influence beyond deterministic explicit relation-kind ranking into semantic, vector, and rules-derived influence.
 - Add commitment-aware path-choice scoring and lifecycle handling so commitments affect confirmation, completion, and release.
-- Add advisory signal retrieval through lens projection and filtering so forecast signals can be queried in context.
 - Expand the existing TemporalBench matrix with missing edge cases for relation-aware influence, commitment-sensitive path choices, advisory signals, and action-loop assimilation.

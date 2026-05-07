@@ -263,6 +263,98 @@ async fn advisory_forecast_signal_empty_client_leaves_provenance_empty() {
 }
 
 #[tokio::test]
+async fn lens_endpoint_projects_matching_persisted_advisory_forecast_signals() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let db_path = data_dir.join("tfk.db");
+    let archive_dir = data_dir.join("archive");
+    let store = Store::open(&db_path, &archive_dir).unwrap();
+    let client = StaticForecastClient::new(vec![
+        AdvisoryForecastSignal {
+            name: "rollback_evidence_gap".to_string(),
+            model: "static-test".to_string(),
+            confidence: 0.93,
+            action_name: Some("verify rollback evidence".to_string()),
+            reason: Some("rollback evidence is missing before irreversible release".to_string()),
+        },
+        AdvisoryForecastSignal {
+            name: "unrelated_calendar_pressure".to_string(),
+            model: "static-test".to_string(),
+            confidence: 0.42,
+            action_name: Some("schedule review".to_string()),
+            reason: Some("calendar drift".to_string()),
+        },
+    ]);
+    let app =
+        tfk_api::router_with_state(tfk_api::ApiState::new(store).with_forecast_client(client));
+
+    let forecast_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/forecast", &forecast_request()))
+        .await
+        .unwrap();
+    assert_eq!(forecast_response.status(), StatusCode::OK);
+    let forecast_envelope: ApiEnvelope<ForecastResult> = read_json(forecast_response).await;
+    assert_eq!(forecast_envelope.provenance.len(), 2);
+
+    let list_response = app
+        .clone()
+        .oneshot(empty_request("GET", "/v1/advisory-forecast-signals"))
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_envelope: ApiEnvelope<Vec<StoredAdvisoryForecastSignal>> =
+        read_json(list_response).await;
+    let stored_signals = list_envelope.data.unwrap();
+    let matching_signal = stored_signals
+        .iter()
+        .find(|signal| signal.name == "rollback_evidence_gap")
+        .unwrap();
+
+    let lens = LensRequest {
+        query: "rollback evidence".to_string(),
+        horizon: Vec::new(),
+        perspective: vec!["risk".to_string()],
+    };
+    let lens_response = app
+        .oneshot(json_request("POST", "/v1/lens", &lens))
+        .await
+        .unwrap();
+
+    assert_eq!(lens_response.status(), StatusCode::OK);
+    let lens_envelope: ApiEnvelope<LensCard> = read_json(lens_response).await;
+    assert!(lens_envelope.ok);
+    let card = lens_envelope.data.unwrap();
+    assert_eq!(card.advisory_forecast_signals.len(), 1);
+    assert_eq!(card.advisory_forecast_signals[0].id, matching_signal.id);
+    assert_eq!(
+        card.advisory_forecast_signals[0].name,
+        "rollback_evidence_gap"
+    );
+    assert_eq!(card.advisory_forecast_signals[0].confidence, 0.93);
+    assert_eq!(card.advisory_forecast_signals[0].model, "static-test");
+    assert_eq!(
+        card.advisory_forecast_signals[0].action_name.as_deref(),
+        Some("verify rollback evidence")
+    );
+    assert_eq!(
+        card.advisory_forecast_signals[0].reason.as_deref(),
+        Some("rollback evidence is missing before irreversible release")
+    );
+    assert!(card
+        .advisory_forecast_signals
+        .iter()
+        .all(|signal| signal.name != "unrelated_calendar_pressure"));
+    let advisory_provenance: Vec<_> = lens_envelope
+        .provenance
+        .iter()
+        .filter(|provenance| provenance.kind == "advisory_forecast_signal")
+        .collect();
+    assert_eq!(advisory_provenance.len(), 1);
+    assert_eq!(advisory_provenance[0].id, matching_signal.id);
+}
+
+#[tokio::test]
 async fn forecast_endpoint_keeps_deterministic_result_when_model_fails() {
     struct FailingClient;
 
