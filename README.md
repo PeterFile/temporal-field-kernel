@@ -36,6 +36,8 @@ cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock relation list
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock commitment list
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock commit create --speaker agent --statement "ship PR1" --scope current_project --deadline 2026-05-07 --revocable true
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock forecast --json-file fixtures/temporalbench/forecast_advisory/basic_forecast.json
+cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock advisory-forecast-signal list
+cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock advisory-forecast-signal get signal_...
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock assimilate --json-file /tmp/delta.json
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock lens "项目状态机"
 ```
