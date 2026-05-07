@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use tfk_eval::{
     replay_action_loop_fixture, replay_fixture, replay_forecast_fixture,
-    replay_lens_linked_raw_event_fixture, replay_relation_boundary_fixture,
-    replay_relation_ranking_fixture,
+    replay_lens_advisory_signal_fixture, replay_lens_linked_raw_event_fixture,
+    replay_relation_boundary_fixture, replay_relation_ranking_fixture,
 };
 
 #[derive(Debug, Parser)]
@@ -35,6 +35,10 @@ enum Command {
         #[arg(long)]
         fixture: PathBuf,
     },
+    LensAdvisorySignal {
+        #[arg(long)]
+        fixture: PathBuf,
+    },
     RelationBoundary {
         #[arg(long)]
         fixture: PathBuf,
@@ -62,6 +66,10 @@ fn main() -> anyhow::Result<()> {
         }
         Command::LensLinkedRawEvent { fixture } => {
             let summary = replay_lens_linked_raw_event_fixture(&fixture)?;
+            println!("{}", serde_json::to_string(&summary)?);
+        }
+        Command::LensAdvisorySignal { fixture } => {
+            let summary = replay_lens_advisory_signal_fixture(&fixture)?;
             println!("{}", serde_json::to_string(&summary)?);
         }
         Command::RelationBoundary { fixture } => {

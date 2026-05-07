@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use tfk_eval::{
     load_fixture_events, replay_action_loop_fixture, replay_fixture, replay_forecast_fixture,
-    replay_lens_linked_raw_event_fixture, replay_relation_boundary_fixture,
-    replay_relation_ranking_fixture,
+    replay_lens_advisory_signal_fixture, replay_lens_linked_raw_event_fixture,
+    replay_relation_boundary_fixture, replay_relation_ranking_fixture,
 };
 use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{AdvisoryForecastSignal, EventSource, EvidenceStatus, ForecastRequest};
@@ -38,6 +38,11 @@ fn commitment_consequence_choice_action_loop_fixture_path() -> PathBuf {
 fn lens_linked_raw_event_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/temporalbench/lens_linked_raw_event/basic.json")
+}
+
+fn lens_advisory_signal_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/lens_advisory_signal/basic.json")
 }
 
 fn relation_boundary_fixture_path() -> PathBuf {
@@ -341,6 +346,59 @@ fn lens_linked_raw_event_cli_prints_structured_json_summary() {
     assert_eq!(value["assimilated_status"], "closed");
     assert_eq!(value["after_stance"], "grounded_recall");
     assert_eq!(value["after_active_continuation_count"], 0);
+    assert_eq!(value["ok"], true);
+}
+
+#[test]
+fn lens_advisory_signal_replay_projects_matching_signal_only() {
+    let summary =
+        replay_lens_advisory_signal_fixture(&lens_advisory_signal_fixture_path()).unwrap();
+
+    assert_eq!(summary.continuation_count, 1);
+    assert_eq!(
+        summary.actual_active_continuation_titles,
+        vec!["irreversible release decision"]
+    );
+    assert_eq!(
+        summary.expected_advisory_signal_names,
+        vec!["rollback_evidence_gap"]
+    );
+    assert_eq!(
+        summary.actual_advisory_signal_names,
+        vec!["rollback_evidence_gap"]
+    );
+    assert_eq!(summary.advisory_signal_count, 1);
+    assert!(summary.ok);
+}
+
+#[test]
+fn lens_advisory_signal_cli_prints_structured_json_summary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tfk-eval"))
+        .args([
+            "lens-advisory-signal",
+            "--fixture",
+            lens_advisory_signal_fixture_path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["continuation_count"], 1);
+    assert_eq!(
+        value["actual_active_continuation_titles"][0],
+        "irreversible release decision"
+    );
+    assert_eq!(
+        value["actual_advisory_signal_names"][0],
+        "rollback_evidence_gap"
+    );
+    assert_eq!(value["advisory_signal_count"], 1);
     assert_eq!(value["ok"], true);
 }
 
