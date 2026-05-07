@@ -157,6 +157,85 @@ fn blocked_matching_continuation_is_constrained_even_when_blocker_does_not_match
 }
 
 #[test]
+fn supports_relation_boosts_supported_target_in_lens_ranking() {
+    let request = lens_request("release");
+    let candidates = vec![
+        active_opportunity("a_supporter", "release supporter"),
+        active_opportunity("z_target", "release target"),
+    ];
+    let relations = vec![ContinuationRelationEdge {
+        from_id: "a_supporter".to_string(),
+        to_id: "z_target".to_string(),
+        kind: ContinuationRelationKind::Supports,
+        reason: Some("supporter unlocks the target path".to_string()),
+    }];
+
+    let card = TimeFieldLensEngine.generate_with_relations(&request, &candidates, &relations, 0);
+
+    assert_eq!(card.active_continuations[0].id, "z_target");
+    assert!(card.active_continuations[0].activation > card.active_continuations[1].activation);
+}
+
+#[test]
+fn depends_on_relation_boosts_prerequisite_in_lens_ranking() {
+    let request = lens_request("release");
+    let candidates = vec![
+        active_opportunity("a_dependent", "release dependent"),
+        active_opportunity("z_prerequisite", "release prerequisite"),
+    ];
+    let relations = vec![ContinuationRelationEdge {
+        from_id: "a_dependent".to_string(),
+        to_id: "z_prerequisite".to_string(),
+        kind: ContinuationRelationKind::DependsOn,
+        reason: Some("dependent should wait on prerequisite".to_string()),
+    }];
+
+    let card = TimeFieldLensEngine.generate_with_relations(&request, &candidates, &relations, 0);
+
+    assert_eq!(card.active_continuations[0].id, "z_prerequisite");
+    assert!(card.active_continuations[0].activation > card.active_continuations[1].activation);
+}
+
+#[test]
+fn subsumes_relation_boosts_parent_in_lens_ranking() {
+    let request = lens_request("release");
+    let candidates = vec![
+        active_opportunity("a_child", "release child"),
+        active_opportunity("z_parent", "release parent"),
+    ];
+    let relations = vec![ContinuationRelationEdge {
+        from_id: "z_parent".to_string(),
+        to_id: "a_child".to_string(),
+        kind: ContinuationRelationKind::Subsumes,
+        reason: Some("parent captures the child path".to_string()),
+    }];
+
+    let card = TimeFieldLensEngine.generate_with_relations(&request, &candidates, &relations, 0);
+
+    assert_eq!(card.active_continuations[0].id, "z_parent");
+    assert!(card.active_continuations[0].activation > card.active_continuations[1].activation);
+}
+
+#[test]
+fn lens_ranking_uses_deterministic_tie_break_when_activation_matches() {
+    let request = lens_request("release");
+    let candidates = vec![
+        active_opportunity("c_tie", "release c"),
+        active_opportunity("a_tie", "release a"),
+        active_opportunity("b_tie", "release b"),
+    ];
+
+    let card = TimeFieldLensEngine.generate(&request, &candidates, 0);
+
+    let ids: Vec<_> = card
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["a_tie", "b_tie", "c_tie"]);
+}
+
+#[test]
 fn forecast_penalizes_blocked_target_not_blocking_prerequisite() {
     let request = ForecastRequest {
         actions: vec![
@@ -301,6 +380,16 @@ fn unresolved_risk_and_questions_emit_temporal_debt_and_verify_action() {
         .is_some_and(|debt| { debt.score > 0.6 && debt.reason.contains("unresolved") }));
     let preferred = card.preferred_action.as_ref().expect("preferred action");
     assert!(preferred.name.contains("verify"));
+}
+
+fn active_opportunity(id: &str, title: &str) -> TimeFieldContinuation {
+    TimeFieldContinuation {
+        id: id.to_string(),
+        title: title.to_string(),
+        summary: "release ranking candidate".to_string(),
+        continuation_type: ContinuationType::Opportunity,
+        status: ContinuationStatus::Active,
+    }
 }
 
 fn lens_request(query: &str) -> LensRequest {
