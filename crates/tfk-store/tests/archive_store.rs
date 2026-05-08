@@ -259,12 +259,32 @@ fn continuation_search_matches_title_and_summary_as_literal_text() {
             raw_event_id: None,
         })
         .unwrap();
-    let other = store
+    let space_distractor = store
+        .create_continuation(&ContinuationInput {
+            title: "状态机 100 literal".to_string(),
+            summary: "semantic token overlap must not bypass escaped LIKE".to_string(),
+            continuation_type: ContinuationType::Narrative,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    let hyphen_distractor = store
+        .create_continuation(&ContinuationInput {
+            title: "状态机 100-literal".to_string(),
+            summary: "semantic token overlap must not bypass escaped LIKE".to_string(),
+            continuation_type: ContinuationType::Narrative,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    let wildcard_candidate = store
         .create_continuation(&ContinuationInput {
             title: "状态机 100xxliteral".to_string(),
             summary: "unrelated".to_string(),
             continuation_type: ContinuationType::Narrative,
-            status: ContinuationStatus::Deferred,
+            status: ContinuationStatus::Active,
             parent_id: None,
             raw_event_id: None,
         })
@@ -272,10 +292,153 @@ fn continuation_search_matches_title_and_summary_as_literal_text() {
 
     let title_hits = store.search_continuations("100%_literal").unwrap();
     assert_eq!(title_hits, vec![target.id.clone()]);
+    assert!(!title_hits.contains(&space_distractor.id));
+    assert!(!title_hits.contains(&hyphen_distractor.id));
+    assert!(!title_hits.contains(&wildcard_candidate.id));
 
     let summary_hits = store.search_continuations("continuation graph").unwrap();
     assert_eq!(summary_hits, vec![target.id]);
-    assert!(!summary_hits.contains(&other.id));
+    assert!(!summary_hits.contains(&space_distractor.id));
+    assert!(!summary_hits.contains(&hyphen_distractor.id));
+    assert!(!summary_hits.contains(&wildcard_candidate.id));
+}
+
+#[test]
+fn continuation_search_treats_backslash_query_as_literal_text() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let create = |title: &str, summary: &str, continuation_type| {
+        store
+            .create_continuation(&ContinuationInput {
+                title: title.to_string(),
+                summary: summary.to_string(),
+                continuation_type,
+                status: ContinuationStatus::Active,
+                parent_id: None,
+                raw_event_id: None,
+            })
+            .unwrap()
+    };
+
+    let target = create(
+        r"状态机 100\literal",
+        "literal backslash query should stay exact",
+        ContinuationType::Risk,
+    );
+    let space_distractor = create(
+        "状态机 100 literal",
+        "semantic token overlap must not bypass escaped LIKE",
+        ContinuationType::Narrative,
+    );
+    let hyphen_distractor = create(
+        "状态机 100-literal",
+        "semantic token overlap must not bypass escaped LIKE",
+        ContinuationType::Narrative,
+    );
+    let wildcard_candidate = create(
+        "状态机 100xxliteral",
+        "unrelated",
+        ContinuationType::Narrative,
+    );
+
+    let hits = store.search_continuations(r"100\literal").unwrap();
+    assert_eq!(hits, vec![target.id.clone()]);
+    assert!(!hits.contains(&space_distractor.id));
+    assert!(!hits.contains(&hyphen_distractor.id));
+    assert!(!hits.contains(&wildcard_candidate.id));
+}
+
+#[test]
+fn continuation_search_expands_distributed_semantic_query_tokens() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let target = store
+        .create_continuation(&ContinuationInput {
+            title: "rollback verifier".to_string(),
+            summary: "release gate stays closed until evidence is checked".to_string(),
+            continuation_type: ContinuationType::Risk,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    let rollback_only = store
+        .create_continuation(&ContinuationInput {
+            title: "rollback only".to_string(),
+            summary: "unrelated deployment note".to_string(),
+            continuation_type: ContinuationType::Narrative,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    let gate_only = store
+        .create_continuation(&ContinuationInput {
+            title: "gate only".to_string(),
+            summary: "unrelated release note".to_string(),
+            continuation_type: ContinuationType::Narrative,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+
+    let hits = store.search_continuations("the rollback and gate").unwrap();
+
+    assert_eq!(hits, vec![target.id]);
+    assert!(!hits.contains(&rollback_only.id));
+    assert!(!hits.contains(&gate_only.id));
+}
+
+#[test]
+fn continuation_search_keeps_exact_phrase_ahead_of_semantic_token_overlap() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let semantic = store
+        .create_continuation(&ContinuationInput {
+            title: "rollback verifier".to_string(),
+            summary: "release gate stays closed until evidence is checked".to_string(),
+            continuation_type: ContinuationType::Risk,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    let exact = store
+        .create_continuation(&ContinuationInput {
+            title: "rollback gate".to_string(),
+            summary: "exact phrase should win candidate ordering".to_string(),
+            continuation_type: ContinuationType::Risk,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+
+    let hits = store.search_continuations("rollback gate").unwrap();
+
+    assert_eq!(hits, vec![exact.id, semantic.id]);
+}
+
+#[test]
+fn continuation_search_requires_more_than_one_token_for_multi_token_queries() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let rollback_only = store
+        .create_continuation(&ContinuationInput {
+            title: "rollback only".to_string(),
+            summary: "unrelated deployment note".to_string(),
+            continuation_type: ContinuationType::Narrative,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+
+    let hits = store.search_continuations("rollback gate").unwrap();
+
+    assert!(hits.is_empty(), "single-token noise leaked: {hits:?}");
+    assert!(!hits.contains(&rollback_only.id));
 }
 
 #[test]

@@ -159,6 +159,80 @@ fn blocked_matching_continuation_is_constrained_even_when_blocker_does_not_match
 }
 
 #[test]
+fn multi_token_semantic_overlap_rejects_single_token_match() {
+    let request = lens_request("rollback gate");
+    let candidates = vec![
+        active_opportunity("a_partial", "rollback only"),
+        TimeFieldContinuation {
+            id: "z_full".to_string(),
+            title: "rollback verifier".to_string(),
+            summary: "release gate stays closed until evidence is checked".to_string(),
+            continuation_type: ContinuationType::Opportunity,
+            status: ContinuationStatus::Active,
+        },
+    ];
+
+    let card = TimeFieldLensEngine.generate(&request, &candidates, 0);
+
+    let ids: Vec<_> = card
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["z_full"]);
+}
+
+#[test]
+fn literal_wildcard_query_does_not_expand_to_semantic_tokens() {
+    let request = lens_request("100%_literal");
+    let candidates = vec![
+        TimeFieldContinuation {
+            id: "target_literal".to_string(),
+            title: "100%_literal".to_string(),
+            summary: "literal LIKE escaping must stay exact".to_string(),
+            continuation_type: ContinuationType::Opportunity,
+            status: ContinuationStatus::Active,
+        },
+        active_opportunity("space_distractor", "100 literal"),
+        active_opportunity("hyphen_distractor", "100-literal"),
+    ];
+
+    let card = TimeFieldLensEngine.generate(&request, &candidates, 0);
+
+    let ids: Vec<_> = card
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["target_literal"]);
+}
+
+#[test]
+fn literal_backslash_query_does_not_expand_to_semantic_tokens() {
+    let request = lens_request(r"100\literal");
+    let candidates = vec![
+        TimeFieldContinuation {
+            id: "target_literal".to_string(),
+            title: r"100\literal".to_string(),
+            summary: "literal backslash matching must stay exact".to_string(),
+            continuation_type: ContinuationType::Opportunity,
+            status: ContinuationStatus::Active,
+        },
+        active_opportunity("space_distractor", "100 literal"),
+        active_opportunity("hyphen_distractor", "100-literal"),
+    ];
+
+    let card = TimeFieldLensEngine.generate(&request, &candidates, 0);
+
+    let ids: Vec<_> = card
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["target_literal"]);
+}
+
+#[test]
 fn supports_relation_boosts_supported_target_in_lens_ranking() {
     let request = lens_request("release");
     let candidates = vec![

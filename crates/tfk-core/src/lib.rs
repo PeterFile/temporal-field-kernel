@@ -560,13 +560,69 @@ fn semantic_match(continuation: &TimeFieldContinuation, query: &str) -> f64 {
     if text.contains(&query) {
         return 1.0;
     }
-
-    let mut tokens = query.split_whitespace().filter(|token| !token.is_empty());
-    if tokens.any(|token| text.contains(token)) {
-        0.7
-    } else {
-        0.0
+    if !allows_semantic_query_expansion(&query) {
+        return 0.0;
     }
+
+    let tokens = semantic_query_tokens(&query);
+    if tokens.is_empty() {
+        return 0.0;
+    }
+    let required_token_hits = tokens.len().min(2);
+    let text_tokens = semantic_query_tokens(&text);
+    let hits = tokens
+        .iter()
+        .filter(|token| text_tokens.iter().any(|text_token| text_token == *token))
+        .count();
+    if hits < required_token_hits {
+        return 0.0;
+    }
+
+    0.5 + (0.4 * (hits as f64 / tokens.len() as f64))
+}
+
+fn allows_semantic_query_expansion(query: &str) -> bool {
+    !query.chars().any(|ch| matches!(ch, '%' | '_' | '\\'))
+}
+
+fn semantic_query_tokens(query: &str) -> Vec<String> {
+    let normalized: String = query
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let mut tokens = Vec::new();
+    for token in normalized.split_whitespace() {
+        if !is_semantic_query_token(token) || tokens.iter().any(|existing| existing == token) {
+            continue;
+        }
+        tokens.push(token.to_string());
+    }
+    tokens
+}
+
+fn is_semantic_query_token(token: &str) -> bool {
+    token.chars().count() >= 3
+        && !matches!(
+            token,
+            "and"
+                | "are"
+                | "but"
+                | "for"
+                | "from"
+                | "not"
+                | "the"
+                | "that"
+                | "this"
+                | "with"
+                | "into"
+                | "onto"
+        )
 }
 
 fn horizon_overlap(_continuation: &TimeFieldContinuation, horizon: &[String]) -> f64 {

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -19,6 +19,11 @@ use tfk_vector::{
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+const CONTINUATION_SEARCH_RESULT_LIMIT: usize = 20;
+const CONTINUATION_SEARCH_TOKEN_LIMIT: usize = 4;
+const CONTINUATION_SEARCH_TOKEN_CANDIDATE_LIMIT: usize = 50;
+const SEMANTIC_QUERY_CHAR_LIMIT: usize = 256;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -408,24 +413,137 @@ impl Store {
     }
 
     pub fn search_continuations(&self, query: &str) -> Result<Vec<String>> {
-        if query.trim().is_empty() {
+        let query = query.trim();
+        if query.is_empty() {
             return Ok(Vec::new());
         }
 
+        let mut candidates = HashMap::new();
+        let mut next_ordinal = 0usize;
+        self.collect_literal_continuation_candidates(query, &mut candidates, &mut next_ordinal)?;
+
+        if allows_semantic_query_expansion(query) {
+            let semantic_query = bounded_semantic_query(query);
+            let tokens: Vec<_> = semantic_query_tokens(&semantic_query)
+                .into_iter()
+                .take(CONTINUATION_SEARCH_TOKEN_LIMIT)
+                .collect();
+            let required_token_hits = tokens.len().min(2);
+            if required_token_hits > 0 {
+                for token in &tokens {
+                    self.collect_token_continuation_candidates(
+                        token,
+                        &tokens,
+                        required_token_hits,
+                        &mut candidates,
+                        &mut next_ordinal,
+                    )?;
+                }
+            }
+        }
+
+        let mut hits: Vec<_> = candidates.into_values().collect();
+        hits.sort_by(|left, right| {
+            right
+                .phrase_match
+                .cmp(&left.phrase_match)
+                .then_with(|| right.token_hits.cmp(&left.token_hits))
+                .then_with(|| left.ordinal.cmp(&right.ordinal))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        hits.truncate(CONTINUATION_SEARCH_RESULT_LIMIT);
+        Ok(hits.into_iter().map(|hit| hit.id).collect())
+    }
+
+    fn collect_literal_continuation_candidates(
+        &self,
+        query: &str,
+        candidates: &mut HashMap<String, ContinuationSearchHit>,
+        next_ordinal: &mut usize,
+    ) -> Result<()> {
         let pattern = like_literal_pattern(query);
         let mut stmt = self.conn.prepare(
             "SELECT id FROM continuations
              WHERE title LIKE ?1 ESCAPE '\\'
                 OR summary LIKE ?1 ESCAPE '\\'
              ORDER BY updated_at, id
-             LIMIT 20",
+             LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![pattern], |row| row.get::<_, String>(0))?;
-        let mut hits = Vec::new();
+        let rows = stmt.query_map(
+            params![pattern, CONTINUATION_SEARCH_RESULT_LIMIT as i64],
+            |row| row.get::<_, String>(0),
+        )?;
         for row in rows {
-            hits.push(row?);
+            let id = row?;
+            candidates.entry(id.clone()).or_insert_with(|| {
+                let ordinal = *next_ordinal;
+                *next_ordinal += 1;
+                ContinuationSearchHit {
+                    id,
+                    phrase_match: true,
+                    token_hits: 0,
+                    ordinal,
+                }
+            });
         }
-        Ok(hits)
+        Ok(())
+    }
+
+    fn collect_token_continuation_candidates(
+        &self,
+        token: &str,
+        query_tokens: &[String],
+        required_token_hits: usize,
+        candidates: &mut HashMap<String, ContinuationSearchHit>,
+        next_ordinal: &mut usize,
+    ) -> Result<()> {
+        let fts_query = fts_literal_query(token);
+        let mut stmt = self.conn.prepare(
+            "SELECT continuations.id, continuations.title, continuations.summary
+             FROM continuation_search_fts
+             JOIN continuations ON continuations.rowid = continuation_search_fts.rowid
+             WHERE continuation_search_fts MATCH ?1
+             ORDER BY continuations.updated_at, continuations.id
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            params![fts_query, CONTINUATION_SEARCH_TOKEN_CANDIDATE_LIMIT as i64],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+
+        for row in rows {
+            let (id, title, summary) = row?;
+            let text = format!("{title} {summary}");
+            let text_tokens = semantic_query_tokens(&text);
+            let token_hits = query_tokens
+                .iter()
+                .filter(|token| text_tokens.iter().any(|text_token| text_token == *token))
+                .count();
+            if token_hits < required_token_hits {
+                continue;
+            }
+
+            candidates
+                .entry(id.clone())
+                .and_modify(|hit| hit.token_hits = hit.token_hits.max(token_hits))
+                .or_insert_with(|| {
+                    let ordinal = *next_ordinal;
+                    *next_ordinal += 1;
+                    ContinuationSearchHit {
+                        id,
+                        phrase_match: false,
+                        token_hits,
+                        ordinal,
+                    }
+                });
+        }
+        Ok(())
     }
 
     pub fn active_continuations_for_raw_event_ids(
@@ -878,6 +996,13 @@ fn update_linked_active_commitments(
     Ok(())
 }
 
+struct ContinuationSearchHit {
+    id: String,
+    phrase_match: bool,
+    token_hits: usize,
+    ordinal: usize,
+}
+
 struct ContinuationFields {
     id: String,
     title: String,
@@ -1122,6 +1247,58 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
+fn bounded_semantic_query(query: &str) -> String {
+    query.chars().take(SEMANTIC_QUERY_CHAR_LIMIT).collect()
+}
+
+fn allows_semantic_query_expansion(query: &str) -> bool {
+    !query.chars().any(|ch| matches!(ch, '%' | '_' | '\\'))
+}
+
+fn semantic_query_tokens(query: &str) -> Vec<String> {
+    let normalized: String = query
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let mut seen = HashSet::new();
+    let mut tokens = Vec::new();
+    for token in normalized.split_whitespace() {
+        if !is_semantic_query_token(token) {
+            continue;
+        }
+        let token = token.to_string();
+        if seen.insert(token.clone()) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+fn is_semantic_query_token(token: &str) -> bool {
+    token.chars().count() >= 3
+        && !matches!(
+            token,
+            "and"
+                | "are"
+                | "but"
+                | "for"
+                | "from"
+                | "not"
+                | "the"
+                | "that"
+                | "this"
+                | "with"
+                | "into"
+                | "onto"
+        )
+}
+
 fn like_literal_pattern(query: &str) -> String {
     let mut pattern = String::with_capacity(query.len() + 2);
     pattern.push('%');
@@ -1174,6 +1351,23 @@ fn run_migrations(conn: &Connection) -> Result<()> {
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+        CREATE VIRTUAL TABLE IF NOT EXISTS continuation_search_fts
+        USING fts5(id UNINDEXED, title, summary, tokenize='unicode61');
+        CREATE TRIGGER IF NOT EXISTS continuations_search_fts_ai
+        AFTER INSERT ON continuations BEGIN
+          INSERT INTO continuation_search_fts(rowid, id, title, summary)
+          VALUES (new.rowid, new.id, new.title, new.summary);
+        END;
+        CREATE TRIGGER IF NOT EXISTS continuations_search_fts_ad
+        AFTER DELETE ON continuations BEGIN
+          DELETE FROM continuation_search_fts WHERE rowid = old.rowid;
+        END;
+        CREATE TRIGGER IF NOT EXISTS continuations_search_fts_au
+        AFTER UPDATE OF title, summary ON continuations BEGIN
+          UPDATE continuation_search_fts
+          SET id = new.id, title = new.title, summary = new.summary
+          WHERE rowid = old.rowid;
+        END;
         CREATE TABLE IF NOT EXISTS commitments (
           id TEXT PRIMARY KEY,
           continuation_id TEXT NOT NULL REFERENCES continuations(id),
@@ -1218,6 +1412,17 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    conn.execute(
+        "INSERT INTO continuation_search_fts(rowid, id, title, summary)
+         SELECT continuations.rowid, continuations.id, continuations.title, continuations.summary
+         FROM continuations
+         WHERE NOT EXISTS (
+             SELECT 1
+             FROM continuation_search_fts
+             WHERE continuation_search_fts.rowid = continuations.rowid
+         )",
+        [],
+    )?;
     deduplicate_continuation_relations(conn)?;
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_continuation_relations_from_to_kind
