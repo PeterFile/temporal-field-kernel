@@ -1,0 +1,44 @@
+{
+  "continuations": [
+    {
+      "label": "baseline",
+      "input": {
+        "title": "rules influence baseline risk",
+        "summary": "ordinary unresolved risk without explicit rule markers",
+        "continuation_type": "risk",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "review",
+      "input": {
+        "title": "rules influence review target",
+        "summary": "risk_level=high; time_horizon=near; verify this before action",
+        "continuation_type": "epistemic",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    }
+  ],
+  "lens": {
+    "query": "rules influence",
+    "horizon": ["next-action"],
+    "perspective": ["research"]
+  },
+  "expected": {
+    "top_title": "rules influence review target",
+    "ordered_titles": [
+      "rules influence review target",
+      "rules influence baseline risk"
+    ],
+    "rule_fact_predicates": [
+      "needs_review",
+      "path_choice",
+      "risk_marker",
+      "timing_attention"
+    ]
+  }
+}
