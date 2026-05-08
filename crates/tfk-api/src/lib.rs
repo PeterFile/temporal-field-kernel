@@ -7,7 +7,10 @@ use axum::{
     Json, Router,
 };
 use serde_json::{json, Value};
-use tfk_core::{ForecastScorer, PreflightScorer, TimeFieldContinuation, TimeFieldLensEngine};
+use tfk_core::{
+    lens_rule_facts, ForecastScorer, PreflightScorer, RuleFact, TimeFieldContinuation,
+    TimeFieldLensEngine,
+};
 use tfk_model_client::ForecastPredictionClient;
 use tfk_protocol::{
     ApiEnvelope, CommitRequest, ContinuationInput, ContinuationRelationEdge, ContinuationStatus,
@@ -538,8 +541,8 @@ async fn lens_handler(
         }
     };
 
-    let mut card = if continuations.is_empty() {
-        lens_card(&request, 0, events.len())
+    let (mut card, rule_facts) = if continuations.is_empty() {
+        (lens_card(&request, 0, events.len()), Vec::new())
     } else {
         let time_field_continuations: Vec<_> = continuations
             .iter()
@@ -563,12 +566,15 @@ async fn lens_handler(
                 status: continuation.status,
             })
             .collect();
-        TimeFieldLensEngine.generate_with_relations(
+        let rule_facts = lens_rule_facts(&request, &time_field_continuations);
+        let card = TimeFieldLensEngine.generate_with_relations_and_rule_facts(
             &request,
             &time_field_continuations,
             &relations,
+            &rule_facts,
             0,
-        )
+        );
+        (card, rule_facts)
     };
     let mut commitment_provenance = Vec::new();
     if !commitment_constraints.is_empty() {
@@ -620,9 +626,25 @@ async fn lens_handler(
     };
     provenance.extend(commitment_provenance);
     provenance.extend(advisory_signal_provenance);
+    provenance.extend(rule_fact_provenance(&rule_facts));
     envelope.provenance = provenance;
 
     Ok(Json(envelope))
+}
+
+fn rule_fact_provenance(rule_facts: &[RuleFact]) -> Vec<ProvenanceRef> {
+    rule_facts
+        .iter()
+        .filter(|fact| matches!(fact.predicate.as_str(), "needs_review" | "path_choice"))
+        .map(|fact| ProvenanceRef {
+            kind: "rule_fact".to_string(),
+            id: rule_fact_id(fact),
+        })
+        .collect()
+}
+
+fn rule_fact_id(fact: &RuleFact) -> String {
+    format!("{}({})", fact.predicate, fact.args.join(","))
 }
 
 fn lens_advisory_forecast_signal(
