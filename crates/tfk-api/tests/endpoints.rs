@@ -59,6 +59,232 @@ async fn observe_endpoint_persists_raw_event_and_lens_can_recall_it() {
 }
 
 #[tokio::test]
+async fn lens_endpoint_uses_semantic_candidate_expansion_for_distributed_tokens() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+
+    let target_response = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/continuations",
+            &ContinuationInput {
+                title: "rollback verifier".to_string(),
+                summary: "release gate stays closed until evidence is checked".to_string(),
+                continuation_type: ContinuationType::Risk,
+                status: ContinuationStatus::Active,
+                parent_id: None,
+                raw_event_id: None,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(target_response.status(), StatusCode::OK);
+    let target: ApiEnvelope<StoredContinuation> = read_json(target_response).await;
+    let target = target.data.unwrap();
+
+    for input in [
+        ContinuationInput {
+            title: "rollback only".to_string(),
+            summary: "unrelated deployment note".to_string(),
+            continuation_type: ContinuationType::Narrative,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        },
+        ContinuationInput {
+            title: "gate only".to_string(),
+            summary: "unrelated release note".to_string(),
+            continuation_type: ContinuationType::Narrative,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        },
+    ] {
+        let response = app
+            .clone()
+            .oneshot(json_request("POST", "/v1/continuations", &input))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let lens = LensRequest {
+        query: "rollback gate".to_string(),
+        horizon: vec!["next-action".to_string()],
+        perspective: vec!["safety".to_string()],
+    };
+    let lens_response = app
+        .oneshot(json_request("POST", "/v1/lens", &lens))
+        .await
+        .unwrap();
+
+    assert_eq!(lens_response.status(), StatusCode::OK);
+    let lens_envelope: ApiEnvelope<LensCard> = read_json(lens_response).await;
+    assert!(lens_envelope.ok);
+    let card = lens_envelope.data.unwrap();
+    assert_eq!(card.stance, "verify");
+    assert_eq!(card.active_continuations.len(), 1);
+    assert_eq!(card.active_continuations[0].id, target.id);
+    assert!(lens_envelope
+        .provenance
+        .iter()
+        .any(|provenance| { provenance.kind == "continuation" && provenance.id == target.id }));
+    assert_eq!(
+        lens_envelope
+            .provenance
+            .iter()
+            .filter(|provenance| provenance.kind == "continuation")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn lens_endpoint_ranks_exact_phrase_before_semantic_overlap() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+
+    let semantic = create_typed_continuation_via_api(
+        &app,
+        "rollback verifier",
+        "release gate stays closed until evidence is checked",
+        ContinuationType::Risk,
+    )
+    .await;
+    let exact = create_typed_continuation_via_api(
+        &app,
+        "rollback gate",
+        "exact phrase should win candidate ordering",
+        ContinuationType::Risk,
+    )
+    .await;
+
+    let lens = LensRequest {
+        query: "rollback gate".to_string(),
+        horizon: vec!["next-action".to_string()],
+        perspective: vec!["safety".to_string()],
+    };
+    let lens_response = app
+        .oneshot(json_request("POST", "/v1/lens", &lens))
+        .await
+        .unwrap();
+
+    assert_eq!(lens_response.status(), StatusCode::OK);
+    let lens_envelope: ApiEnvelope<LensCard> = read_json(lens_response).await;
+    assert!(lens_envelope.ok);
+    let card = lens_envelope.data.unwrap();
+    let active_ids: Vec<_> = card
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.id.as_str())
+        .collect();
+    assert_eq!(active_ids, vec![exact.id.as_str(), semantic.id.as_str()]);
+}
+
+#[tokio::test]
+async fn lens_endpoint_treats_wildcard_query_as_literal_and_preserves_exact_hit() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+
+    let exact = create_typed_continuation_via_api(
+        &app,
+        "100%_literal",
+        "exact wildcard literal should still activate",
+        ContinuationType::Risk,
+    )
+    .await;
+    for title in ["100 literal", "100-literal", "100xxliteral"] {
+        create_typed_continuation_via_api(
+            &app,
+            title,
+            "wildcard literal query must not activate token-overlap distractors",
+            ContinuationType::Narrative,
+        )
+        .await;
+    }
+
+    let lens = LensRequest {
+        query: "100%_literal".to_string(),
+        horizon: Vec::new(),
+        perspective: Vec::new(),
+    };
+    let lens_response = app
+        .oneshot(json_request("POST", "/v1/lens", &lens))
+        .await
+        .unwrap();
+
+    assert_eq!(lens_response.status(), StatusCode::OK);
+    let lens_envelope: ApiEnvelope<LensCard> = read_json(lens_response).await;
+    assert!(lens_envelope.ok);
+    let card = lens_envelope.data.unwrap();
+    assert_eq!(
+        card.active_continuations
+            .iter()
+            .map(|continuation| continuation.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![exact.id.as_str()]
+    );
+    assert!(lens_envelope
+        .provenance
+        .iter()
+        .any(|provenance| provenance.kind == "continuation" && provenance.id == exact.id));
+}
+
+#[tokio::test]
+async fn lens_endpoint_treats_backslash_query_as_literal_not_semantic_tokens() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+
+    let exact = create_typed_continuation_via_api(
+        &app,
+        r"100\literal",
+        "exact backslash literal should still activate",
+        ContinuationType::Risk,
+    )
+    .await;
+    for title in ["100 literal", "100-literal", "100xxliteral"] {
+        create_typed_continuation_via_api(
+            &app,
+            title,
+            "backslash literal query must not activate token-overlap distractors",
+            ContinuationType::Narrative,
+        )
+        .await;
+    }
+
+    let lens = LensRequest {
+        query: r"100\literal".to_string(),
+        horizon: Vec::new(),
+        perspective: Vec::new(),
+    };
+    let lens_response = app
+        .oneshot(json_request("POST", "/v1/lens", &lens))
+        .await
+        .unwrap();
+
+    assert_eq!(lens_response.status(), StatusCode::OK);
+    let lens_envelope: ApiEnvelope<LensCard> = read_json(lens_response).await;
+    assert!(lens_envelope.ok);
+    let card = lens_envelope.data.unwrap();
+    assert_eq!(
+        card.active_continuations
+            .iter()
+            .map(|continuation| continuation.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![exact.id.as_str()]
+    );
+    assert!(lens_envelope
+        .provenance
+        .iter()
+        .any(|provenance| provenance.kind == "continuation" && provenance.id == exact.id));
+}
+
+#[tokio::test]
 async fn preflight_endpoint_returns_confirmation_decision() {
     let tmp = tempdir().unwrap();
     let store = open_test_store(tmp.path());
