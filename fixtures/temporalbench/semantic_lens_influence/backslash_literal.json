@@ -1,0 +1,57 @@
+{
+  "continuations": [
+    {
+      "label": "exact_literal",
+      "input": {
+        "title": "100\\literal",
+        "summary": "literal backslash characters must remain literal",
+        "continuation_type": "risk",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "space_distractor",
+      "input": {
+        "title": "100 literal",
+        "summary": "tokenized backslash false positive should not activate",
+        "continuation_type": "narrative",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "dash_distractor",
+      "input": {
+        "title": "100-literal",
+        "summary": "punctuation normalization false positive should not activate",
+        "continuation_type": "narrative",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "joined_distractor",
+      "input": {
+        "title": "100xxliteral",
+        "summary": "LIKE escape false positive should not activate",
+        "continuation_type": "narrative",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    }
+  ],
+  "lens": {
+    "query": "100\\literal",
+    "horizon": ["next-action"],
+    "perspective": ["safety"]
+  },
+  "expected": {
+    "top_title": "100\\literal",
+    "ordered_titles": ["100\\literal"]
+  }
+}
