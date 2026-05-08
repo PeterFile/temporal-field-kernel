@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tfk_protocol::{
@@ -539,6 +540,8 @@ impl Store {
     }
 
     pub fn assimilate_delta(&mut self, input: &TemporalDeltaInput) -> Result<StoredTemporalDelta> {
+        reject_duplicate_status_delta_targets(input)?;
+
         let id = format!("delta_{}", Uuid::new_v4().simple());
         let now = now_rfc3339()?;
         let changes_json = serde_json::to_string(&input.changes)?;
@@ -560,6 +563,11 @@ impl Store {
             ],
         )?;
         for change in &input.changes {
+            if change.delta == ContinuationDelta::Retire {
+                reject_retire_with_nonrevocable_active_commitment(&tx, &change.continuation_id)?;
+            }
+        }
+        for change in &input.changes {
             let Some(status) = status_for_delta(change.delta) else {
                 continue;
             };
@@ -576,6 +584,7 @@ impl Store {
                     change.delta, change.continuation_id
                 )));
             }
+            apply_commitment_lifecycle_delta(&tx, change.delta, &change.continuation_id)?;
         }
         tx.commit()?;
 
@@ -786,6 +795,87 @@ fn status_for_delta(delta: ContinuationDelta) -> Option<ContinuationStatus> {
         ContinuationDelta::Close => Some(ContinuationStatus::Closed),
         ContinuationDelta::Retire => Some(ContinuationStatus::Retired),
     }
+}
+
+fn reject_duplicate_status_delta_targets(input: &TemporalDeltaInput) -> Result<()> {
+    let mut seen = HashSet::new();
+    for change in &input.changes {
+        if status_for_delta(change.delta).is_none() {
+            continue;
+        }
+        if !seen.insert(change.continuation_id.as_str()) {
+            return Err(StoreError::InvalidTemporalDelta(format!(
+                "multiple status deltas target continuation {} in one temporal delta",
+                change.continuation_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn apply_commitment_lifecycle_delta(
+    tx: &Transaction<'_>,
+    delta: ContinuationDelta,
+    continuation_id: &str,
+) -> Result<()> {
+    match delta {
+        ContinuationDelta::Close => {
+            update_linked_active_commitments(tx, continuation_id, ContinuationStatus::Closed)?;
+        }
+        ContinuationDelta::Retire => {
+            reject_retire_with_nonrevocable_active_commitment(tx, continuation_id)?;
+            update_linked_active_commitments(tx, continuation_id, ContinuationStatus::Retired)?;
+        }
+        ContinuationDelta::Activate
+        | ContinuationDelta::Advance
+        | ContinuationDelta::Repair
+        | ContinuationDelta::Verify
+        | ContinuationDelta::Renegotiate
+        | ContinuationDelta::Stabilize
+        | ContinuationDelta::Defer
+        | ContinuationDelta::Create
+        | ContinuationDelta::Split => {}
+    }
+    Ok(())
+}
+
+fn reject_retire_with_nonrevocable_active_commitment(
+    tx: &Transaction<'_>,
+    continuation_id: &str,
+) -> Result<()> {
+    let has_nonrevocable: bool = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM commitments
+            WHERE continuation_id = ?1
+              AND status = 'active'
+              AND revocable = 0
+         )",
+        params![continuation_id],
+        |row| row.get(0),
+    )?;
+    if has_nonrevocable {
+        return Err(StoreError::InvalidTemporalDelta(format!(
+            "retire delta references non-revocable active commitment for continuation {}",
+            continuation_id
+        )));
+    }
+    Ok(())
+}
+
+fn update_linked_active_commitments(
+    tx: &Transaction<'_>,
+    continuation_id: &str,
+    status: ContinuationStatus,
+) -> Result<()> {
+    let status = continuation_status_to_string(status)?;
+    tx.execute(
+        "UPDATE commitments
+         SET status = ?1
+         WHERE continuation_id = ?2
+           AND status = 'active'",
+        params![status, continuation_id],
+    )?;
+    Ok(())
 }
 
 struct ContinuationFields {
