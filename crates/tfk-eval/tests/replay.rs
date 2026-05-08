@@ -6,7 +6,7 @@ use tfk_eval::{
     load_fixture_events, replay_action_loop_fixture, replay_commitment_forecast_fixture,
     replay_fixture, replay_forecast_fixture, replay_lens_advisory_signal_fixture,
     replay_lens_linked_raw_event_fixture, replay_relation_boundary_fixture,
-    replay_relation_ranking_fixture,
+    replay_relation_ranking_fixture, replay_rules_lens_influence_fixture,
 };
 use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{AdvisoryForecastSignal, EventSource, EvidenceStatus, ForecastRequest};
@@ -59,6 +59,11 @@ fn relation_boundary_fixture_path() -> PathBuf {
 fn relation_ranking_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/temporalbench/relation_ranking/basic.json")
+}
+
+fn rules_lens_influence_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/rules_lens_influence/review_now.json")
 }
 
 fn commitment_forecast_fixture_path() -> PathBuf {
@@ -581,6 +586,67 @@ fn relation_ranking_cli_prints_structured_json_summary() {
         .unwrap()
         .starts_with("cont_"));
     assert_eq!(value["actual_ordered_ids"].as_array().unwrap().len(), 6);
+    assert_eq!(value["ok"], true);
+}
+
+#[test]
+fn rules_lens_influence_replay_promotes_rule_derived_review_target() {
+    let summary =
+        replay_rules_lens_influence_fixture(&rules_lens_influence_fixture_path()).unwrap();
+
+    assert_eq!(summary.continuation_count, 2);
+    assert_eq!(summary.expected_top_title, "rules influence review target");
+    assert_eq!(summary.actual_top_title, "rules influence review target");
+    assert_eq!(
+        summary.actual_ordered_titles,
+        vec![
+            "rules influence review target".to_string(),
+            "rules influence baseline risk".to_string(),
+        ]
+    );
+    assert_eq!(
+        summary.actual_rule_fact_predicates,
+        vec![
+            "needs_review".to_string(),
+            "path_choice".to_string(),
+            "risk_marker".to_string(),
+            "timing_attention".to_string(),
+        ]
+    );
+    assert!(summary
+        .rule_fact_ids
+        .iter()
+        .any(|id| id.contains("path_choice") && id.contains("review_now")));
+    assert!(summary.ok);
+}
+
+#[test]
+fn rules_lens_influence_cli_prints_structured_json_summary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tfk-eval"))
+        .args([
+            "rules-lens-influence",
+            "--fixture",
+            rules_lens_influence_fixture_path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["continuation_count"], 2);
+    assert_eq!(value["actual_top_title"], "rules influence review target");
+    assert_eq!(
+        value["actual_rule_fact_predicates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
     assert_eq!(value["ok"], true);
 }
 

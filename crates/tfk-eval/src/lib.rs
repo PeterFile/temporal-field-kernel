@@ -5,7 +5,10 @@ use std::path::Path;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use tfk_core::{ForecastScorer, PreflightScorer, TimeFieldContinuation, TimeFieldLensEngine};
+use tfk_core::{
+    lens_rule_facts, ForecastScorer, PreflightScorer, RuleFact, TimeFieldContinuation,
+    TimeFieldLensEngine,
+};
 use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{
     AdvisoryForecastSignal, CommitRequest, ContinuationDelta, ContinuationRelationEdge,
@@ -109,6 +112,20 @@ pub struct CommitmentForecastReplaySummary {
     pub actual_top_action: String,
     pub constrained_action: String,
     pub constrained_action_requires_confirmation: bool,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RulesLensInfluenceReplaySummary {
+    pub fixture_path: String,
+    pub continuation_count: usize,
+    pub expected_top_title: String,
+    pub actual_top_title: String,
+    pub expected_ordered_titles: Vec<String>,
+    pub actual_ordered_titles: Vec<String>,
+    pub expected_rule_fact_predicates: Vec<String>,
+    pub actual_rule_fact_predicates: Vec<String>,
+    pub rule_fact_ids: Vec<String>,
     pub ok: bool,
 }
 
@@ -664,6 +681,60 @@ pub fn replay_commitment_forecast_fixture(
     })
 }
 
+pub fn replay_rules_lens_influence_fixture(
+    path: &Path,
+) -> anyhow::Result<RulesLensInfluenceReplaySummary> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
+    let fixture: RulesLensInfluenceFixture = serde_json::from_reader(file)
+        .with_context(|| format!("invalid fixture {}", path.display()))?;
+    let tmp = tempfile::tempdir().context("failed to create rules-lens temp directory")?;
+    let data_dir = tmp.path().join("store");
+    let store = Store::open(data_dir.join("tfk.db"), data_dir.join("archive"))
+        .context("failed to open rules-lens store")?;
+
+    let continuation_count = fixture.continuations.len();
+    for continuation in &fixture.continuations {
+        store
+            .create_continuation(&continuation.input)
+            .with_context(|| format!("failed to create continuation {}", continuation.label))?;
+    }
+
+    let (card, rule_facts) = lens_from_store_with_rule_facts(&store, &fixture.lens)
+        .context("failed to run rules-derived lens influence")?;
+    let actual_ordered_titles: Vec<_> = card
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.title.clone())
+        .collect();
+    let actual_top_title = actual_ordered_titles.first().cloned().unwrap_or_default();
+    let expected_top_title = fixture.expected.top_title;
+    let expected_ordered_titles = fixture.expected.ordered_titles;
+    let expected_rule_fact_predicates = fixture.expected.rule_fact_predicates;
+    let rule_fact_ids: Vec<_> = rule_facts
+        .iter()
+        .filter(|fact| is_lens_relevant_rule_fact(fact))
+        .map(rule_fact_id)
+        .collect();
+    let actual_rule_fact_predicates = lens_relevant_rule_fact_predicates(&rule_facts);
+    let ok = actual_top_title == expected_top_title
+        && actual_ordered_titles == expected_ordered_titles
+        && actual_rule_fact_predicates == expected_rule_fact_predicates;
+
+    Ok(RulesLensInfluenceReplaySummary {
+        fixture_path: path.to_string_lossy().to_string(),
+        continuation_count,
+        expected_top_title,
+        actual_top_title,
+        expected_ordered_titles,
+        actual_ordered_titles,
+        expected_rule_fact_predicates,
+        actual_rule_fact_predicates,
+        rule_fact_ids,
+        ok,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct ForecastFixture {
     request: ForecastRequest,
@@ -813,6 +884,26 @@ struct RelationRankingExpected {
 }
 
 #[derive(Debug, Deserialize)]
+struct RulesLensInfluenceFixture {
+    continuations: Vec<RulesLensInfluenceContinuation>,
+    lens: LensRequest,
+    expected: RulesLensInfluenceExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct RulesLensInfluenceContinuation {
+    label: String,
+    input: tfk_protocol::ContinuationInput,
+}
+
+#[derive(Debug, Deserialize)]
+struct RulesLensInfluenceExpected {
+    top_title: String,
+    ordered_titles: Vec<String>,
+    rule_fact_predicates: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct LensAdvisorySignalFixture {
     continuations: Vec<LensAdvisorySignalContinuation>,
     advisory_signals: Vec<AdvisoryForecastSignal>,
@@ -866,6 +957,13 @@ impl From<FixtureEventRecord> for RawEventInput {
 }
 
 fn lens_from_store(store: &Store, request: &LensRequest) -> anyhow::Result<LensCard> {
+    Ok(lens_from_store_with_rule_facts(store, request)?.0)
+}
+
+fn lens_from_store_with_rule_facts(
+    store: &Store,
+    request: &LensRequest,
+) -> anyhow::Result<(LensCard, Vec<RuleFact>)> {
     let advisory_signals = store
         .search_advisory_forecast_signals(&request.query)
         .context("failed to search advisory forecast signals")?;
@@ -968,10 +1066,12 @@ fn lens_from_store(store: &Store, request: &LensRequest) -> anyhow::Result<LensC
             status: continuation.status,
         })
         .collect();
-    let mut card = TimeFieldLensEngine.generate_with_relations(
+    let rule_facts = lens_rule_facts(request, &time_field_continuations);
+    let mut card = TimeFieldLensEngine.generate_with_relations_and_rule_facts(
         request,
         &time_field_continuations,
         &relations,
+        &rule_facts,
         raw_event_count,
     );
     card.commitment_constraints = commitment_constraints;
@@ -979,7 +1079,29 @@ fn lens_from_store(store: &Store, request: &LensRequest) -> anyhow::Result<LensC
         .iter()
         .map(lens_advisory_forecast_signal)
         .collect();
-    Ok(card)
+    Ok((card, rule_facts))
+}
+
+fn is_lens_relevant_rule_fact(fact: &RuleFact) -> bool {
+    matches!(
+        fact.predicate.as_str(),
+        "needs_review" | "risk_marker" | "timing_attention" | "path_choice"
+    )
+}
+
+fn lens_relevant_rule_fact_predicates(rule_facts: &[RuleFact]) -> Vec<String> {
+    let mut predicates: Vec<_> = rule_facts
+        .iter()
+        .filter(|fact| is_lens_relevant_rule_fact(fact))
+        .map(|fact| fact.predicate.clone())
+        .collect();
+    predicates.sort();
+    predicates.dedup();
+    predicates
+}
+
+fn rule_fact_id(fact: &RuleFact) -> String {
+    format!("{}({})", fact.predicate, fact.args.join(","))
 }
 
 fn lens_advisory_forecast_signal(

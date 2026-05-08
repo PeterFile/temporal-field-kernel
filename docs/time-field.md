@@ -43,6 +43,7 @@ The current implementation is contract-level and local-first. It includes:
 - continuation graph with explicit idempotent continuation relations
 - relation-aware temporal lens cards with raw event fallback
 - deterministic explicit relation-kind ranking for active continuations (`supports`, `depends_on`, `subsumes`) while `conflicts`/`blocks` surface as boundaries
+- rules-derived lens influence from explicit continuation markers through the embedded core rule set
 - structured commitment capture/list support and lens constraints
 - deterministic preflight and commitment-aware forecast scoring for path-choice confirmation
 - optional static/stdio forecast advisory model client
@@ -56,5 +57,4 @@ The kernel does not schedule work, own user workflows, provide a UI, or act as a
 ## Next Slices
 
 - Extend lens influence beyond deterministic explicit relation-kind ranking into semantic, vector, and rules-derived influence.
-- Add commitment lifecycle handling so commitments affect completion and release.
-- Expand the existing TemporalBench matrix with missing edge cases for relation-aware influence, commitment-sensitive path choices, advisory signals, and action-loop assimilation.
+- Expand the existing TemporalBench matrix with missing edge cases for semantic/vector influence and more action-loop assimilation boundaries.
