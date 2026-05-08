@@ -116,6 +116,17 @@ pub struct CommitmentForecastReplaySummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticLensInfluenceReplaySummary {
+    pub fixture_path: String,
+    pub continuation_count: usize,
+    pub expected_top_title: String,
+    pub actual_top_title: String,
+    pub expected_ordered_titles: Vec<String>,
+    pub actual_ordered_titles: Vec<String>,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RulesLensInfluenceReplaySummary {
     pub fixture_path: String,
     pub continuation_count: usize,
@@ -681,6 +692,49 @@ pub fn replay_commitment_forecast_fixture(
     })
 }
 
+pub fn replay_semantic_lens_influence_fixture(
+    path: &Path,
+) -> anyhow::Result<SemanticLensInfluenceReplaySummary> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
+    let fixture: SemanticLensInfluenceFixture = serde_json::from_reader(file)
+        .with_context(|| format!("invalid fixture {}", path.display()))?;
+    let tmp = tempfile::tempdir().context("failed to create semantic-lens temp directory")?;
+    let data_dir = tmp.path().join("store");
+    let store = Store::open(data_dir.join("tfk.db"), data_dir.join("archive"))
+        .context("failed to open semantic-lens store")?;
+
+    let continuation_count = fixture.continuations.len();
+    for continuation in &fixture.continuations {
+        store
+            .create_continuation(&continuation.input)
+            .with_context(|| format!("failed to create continuation {}", continuation.label))?;
+    }
+
+    let card =
+        lens_from_store(&store, &fixture.lens).context("failed to run semantic lens influence")?;
+    let actual_ordered_titles: Vec<_> = card
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.title.clone())
+        .collect();
+    let actual_top_title = actual_ordered_titles.first().cloned().unwrap_or_default();
+    let expected_top_title = fixture.expected.top_title;
+    let expected_ordered_titles = fixture.expected.ordered_titles;
+    let ok =
+        actual_top_title == expected_top_title && actual_ordered_titles == expected_ordered_titles;
+
+    Ok(SemanticLensInfluenceReplaySummary {
+        fixture_path: path.to_string_lossy().to_string(),
+        continuation_count,
+        expected_top_title,
+        actual_top_title,
+        expected_ordered_titles,
+        actual_ordered_titles,
+        ok,
+    })
+}
+
 pub fn replay_rules_lens_influence_fixture(
     path: &Path,
 ) -> anyhow::Result<RulesLensInfluenceReplaySummary> {
@@ -879,6 +933,25 @@ struct RelationRankingRelation {
 
 #[derive(Debug, Deserialize)]
 struct RelationRankingExpected {
+    top_title: String,
+    ordered_titles: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SemanticLensInfluenceFixture {
+    continuations: Vec<SemanticLensInfluenceContinuation>,
+    lens: LensRequest,
+    expected: SemanticLensInfluenceExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct SemanticLensInfluenceContinuation {
+    label: String,
+    input: tfk_protocol::ContinuationInput,
+}
+
+#[derive(Debug, Deserialize)]
+struct SemanticLensInfluenceExpected {
     top_title: String,
     ordered_titles: Vec<String>,
 }

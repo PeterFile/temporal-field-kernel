@@ -1,0 +1,57 @@
+{
+  "continuations": [
+    {
+      "label": "exact",
+      "input": {
+        "title": "rollback gate",
+        "summary": "exact phrase should rank ahead of semantic overlap",
+        "continuation_type": "risk",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "target",
+      "input": {
+        "title": "semantic lens rollback target",
+        "summary": "release gate stays closed until evidence is checked",
+        "continuation_type": "risk",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "rollback_only",
+      "input": {
+        "title": "semantic lens rollback only",
+        "summary": "unrelated deployment note without the other query token",
+        "continuation_type": "narrative",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "gate_only",
+      "input": {
+        "title": "semantic lens gate only",
+        "summary": "unrelated release note without the other query token",
+        "continuation_type": "narrative",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    }
+  ],
+  "lens": {
+    "query": "rollback gate",
+    "horizon": ["next-action"],
+    "perspective": ["safety"]
+  },
+  "expected": {
+    "top_title": "rollback gate",
+    "ordered_titles": ["rollback gate", "semantic lens rollback target"]
+  }
+}

@@ -7,6 +7,7 @@ use tfk_eval::{
     replay_fixture, replay_forecast_fixture, replay_lens_advisory_signal_fixture,
     replay_lens_linked_raw_event_fixture, replay_relation_boundary_fixture,
     replay_relation_ranking_fixture, replay_rules_lens_influence_fixture,
+    replay_semantic_lens_influence_fixture,
 };
 use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{AdvisoryForecastSignal, EventSource, EvidenceStatus, ForecastRequest};
@@ -59,6 +60,21 @@ fn relation_boundary_fixture_path() -> PathBuf {
 fn relation_ranking_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/temporalbench/relation_ranking/basic.json")
+}
+
+fn semantic_lens_influence_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/semantic_lens_influence/basic.json")
+}
+
+fn semantic_lens_wildcard_literal_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/semantic_lens_influence/wildcard_literal.json")
+}
+
+fn semantic_lens_backslash_literal_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/semantic_lens_influence/backslash_literal.json")
 }
 
 fn rules_lens_influence_fixture_path() -> PathBuf {
@@ -586,6 +602,85 @@ fn relation_ranking_cli_prints_structured_json_summary() {
         .unwrap()
         .starts_with("cont_"));
     assert_eq!(value["actual_ordered_ids"].as_array().unwrap().len(), 6);
+    assert_eq!(value["ok"], true);
+}
+
+#[test]
+fn semantic_lens_influence_replay_ranks_exact_phrase_before_distributed_overlap() {
+    let summary =
+        replay_semantic_lens_influence_fixture(&semantic_lens_influence_fixture_path()).unwrap();
+
+    assert_eq!(summary.continuation_count, 4);
+    assert_eq!(summary.expected_top_title, "rollback gate");
+    assert_eq!(summary.actual_top_title, "rollback gate");
+    assert_eq!(
+        summary.actual_ordered_titles,
+        vec![
+            "rollback gate".to_string(),
+            "semantic lens rollback target".to_string(),
+        ]
+    );
+    assert!(summary.ok);
+}
+
+#[test]
+fn semantic_lens_influence_replay_treats_wildcard_query_as_literal() {
+    let summary =
+        replay_semantic_lens_influence_fixture(&semantic_lens_wildcard_literal_fixture_path())
+            .unwrap();
+
+    assert_eq!(summary.continuation_count, 4);
+    assert_eq!(summary.expected_top_title, "100%_literal");
+    assert_eq!(summary.actual_top_title, "100%_literal");
+    assert_eq!(
+        summary.actual_ordered_titles,
+        vec!["100%_literal".to_string()]
+    );
+    assert!(summary.ok);
+}
+
+#[test]
+fn semantic_lens_influence_replay_treats_backslash_query_as_literal() {
+    let summary =
+        replay_semantic_lens_influence_fixture(&semantic_lens_backslash_literal_fixture_path())
+            .unwrap();
+
+    assert_eq!(summary.continuation_count, 4);
+    assert_eq!(summary.expected_top_title, r"100\literal");
+    assert_eq!(summary.actual_top_title, r"100\literal");
+    assert_eq!(
+        summary.actual_ordered_titles,
+        vec![r"100\literal".to_string()]
+    );
+    assert!(summary.ok);
+}
+
+#[test]
+fn semantic_lens_influence_cli_prints_structured_json_summary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tfk-eval"))
+        .args([
+            "semantic-lens-influence",
+            "--fixture",
+            semantic_lens_influence_fixture_path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["continuation_count"], 4);
+    assert_eq!(value["actual_top_title"], "rollback gate");
+    assert_eq!(value["actual_ordered_titles"].as_array().unwrap().len(), 2);
+    assert_eq!(value["actual_ordered_titles"][0], "rollback gate");
+    assert_eq!(
+        value["actual_ordered_titles"][1],
+        "semantic lens rollback target"
+    );
     assert_eq!(value["ok"], true);
 }
 
