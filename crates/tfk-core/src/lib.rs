@@ -5,6 +5,8 @@ use tfk_protocol::{
     TemporalDebtWarning,
 };
 pub use tfk_protocol::{PreflightResult, PreflightSignals};
+use tfk_rules::RuleEngine;
+pub use tfk_rules::RuleFact;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimeFieldContinuation {
@@ -35,12 +37,30 @@ impl TimeFieldLensEngine {
         relations: &[ContinuationRelationEdge],
         raw_event_count: usize,
     ) -> LensCard {
+        self.generate_with_relations_and_rule_facts(
+            request,
+            continuations,
+            relations,
+            &[],
+            raw_event_count,
+        )
+    }
+
+    pub fn generate_with_relations_and_rule_facts(
+        &self,
+        request: &LensRequest,
+        continuations: &[TimeFieldContinuation],
+        relations: &[ContinuationRelationEdge],
+        rule_facts: &[RuleFact],
+        raw_event_count: usize,
+    ) -> LensCard {
         let mut active: Vec<_> = continuations
             .iter()
             .filter(|continuation| !is_closed(continuation.status))
             .filter_map(|continuation| active_continuation_for(continuation, request))
             .collect();
         apply_relation_kind_activation(&mut active, relations);
+        apply_rule_fact_activation(&mut active, rule_facts);
         sort_active_continuations(&mut active);
         let temporal_debt = temporal_debt(&active);
 
@@ -114,6 +134,114 @@ impl TimeFieldLensEngine {
     }
 }
 
+pub fn lens_rule_facts(
+    request: &LensRequest,
+    continuations: &[TimeFieldContinuation],
+) -> Vec<RuleFact> {
+    let mut engine = RuleEngine::with_core_rules();
+    let request_horizon_is_near = request_horizon_is_near(&request.horizon);
+
+    for continuation in continuations
+        .iter()
+        .filter(|continuation| !is_closed(continuation.status))
+    {
+        engine.assert_fact_parts("continuation", [&continuation.id]);
+        engine.assert_fact_parts(
+            "continuation_status",
+            [&continuation.id, status_fact_name(continuation.status)],
+        );
+        engine.assert_fact_parts(
+            "continuation_type",
+            [
+                &continuation.id,
+                continuation_type_fact_name(continuation.continuation_type),
+            ],
+        );
+
+        let text = format!("{} {}", continuation.title, continuation.summary).to_lowercase();
+        if contains_fact_marker(&text, &["risk_level"], "high") {
+            engine.assert_fact_parts("risk_level", [&continuation.id, "high"]);
+        }
+        if request_horizon_is_near
+            || contains_fact_marker(&text, &["time_horizon", "horizon"], "near")
+        {
+            engine.assert_fact_parts("time_horizon", [&continuation.id, "near"]);
+        }
+    }
+
+    engine.evaluate();
+    engine.facts().to_vec()
+}
+
+fn status_fact_name(status: ContinuationStatus) -> &'static str {
+    match status {
+        ContinuationStatus::Active => "active",
+        ContinuationStatus::Stabilized => "stabilized",
+        ContinuationStatus::Deferred => "deferred",
+        ContinuationStatus::Closed => "closed",
+        ContinuationStatus::Retired => "retired",
+    }
+}
+
+fn continuation_type_fact_name(continuation_type: ContinuationType) -> &'static str {
+    match continuation_type {
+        ContinuationType::Obligation => "obligation",
+        ContinuationType::Epistemic => "epistemic",
+        ContinuationType::Relational => "relational",
+        ContinuationType::Narrative => "narrative",
+        ContinuationType::Risk => "risk",
+        ContinuationType::Opportunity => "opportunity",
+        ContinuationType::Rhythm => "rhythm",
+    }
+}
+
+fn request_horizon_is_near(horizon: &[String]) -> bool {
+    horizon.iter().any(|item| {
+        matches!(
+            item.trim().to_lowercase().as_str(),
+            "near" | "now" | "next-action" | "next_action" | "next action"
+        )
+    })
+}
+
+fn contains_fact_marker(text: &str, keys: &[&str], value: &str) -> bool {
+    keys.iter().any(|key| marker_has_value(text, key, value))
+}
+
+fn marker_has_value(text: &str, key: &str, value: &str) -> bool {
+    let mut offset = 0;
+    while let Some(relative_start) = text[offset..].find(key) {
+        let start = offset + relative_start;
+        let key_end = start + key.len();
+        if start > 0 && is_marker_ident(text[..start].chars().next_back().unwrap()) {
+            offset = key_end;
+            continue;
+        }
+
+        let rest = text[key_end..].trim_start();
+        let Some(rest) = rest.strip_prefix('=').or_else(|| rest.strip_prefix(':')) else {
+            offset = key_end;
+            continue;
+        };
+        let rest = rest.trim_start();
+        if rest.starts_with(value)
+            && rest[value.len()..]
+                .chars()
+                .next()
+                .map_or(true, |ch| !is_marker_ident(ch))
+        {
+            return true;
+        }
+        offset = key_end;
+    }
+
+    false
+}
+
+fn is_marker_ident(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
+}
+
 fn apply_relation_kind_activation(
     active: &mut [LensActiveContinuation],
     relations: &[ContinuationRelationEdge],
@@ -139,6 +267,46 @@ fn apply_relation_kind_activation(
 fn scale_activation(active: &mut [LensActiveContinuation], id: &str, factor: f64) {
     if let Some(continuation) = active.iter_mut().find(|continuation| continuation.id == id) {
         continuation.activation *= factor;
+    }
+}
+
+fn apply_rule_fact_activation(active: &mut [LensActiveContinuation], rule_facts: &[RuleFact]) {
+    for fact in rule_facts {
+        let Some(continuation_id) = fact.args.first() else {
+            continue;
+        };
+        match fact.predicate.as_str() {
+            "needs_review" => {
+                scale_activation(active, continuation_id, 1.25);
+                mark_verify_pressure(
+                    active,
+                    continuation_id,
+                    "rules-derived review pressure requires verification",
+                );
+            }
+            "risk_marker" if fact.args.get(1).is_some_and(|value| value == "review") => {
+                scale_activation(active, continuation_id, 1.05);
+            }
+            "timing_attention" => {
+                scale_activation(active, continuation_id, 1.10);
+            }
+            "path_choice" if fact.args.get(1).is_some_and(|value| value == "review_now") => {
+                scale_activation(active, continuation_id, 1.20);
+                mark_verify_pressure(
+                    active,
+                    continuation_id,
+                    "rules-derived review_now path choice would be missed",
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn mark_verify_pressure(active: &mut [LensActiveContinuation], id: &str, reason: &str) {
+    if let Some(continuation) = active.iter_mut().find(|continuation| continuation.id == id) {
+        continuation.recommended_delta = ContinuationDelta::Verify;
+        continuation.risk_if_ignored = reason.to_string();
     }
 }
 

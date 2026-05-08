@@ -10,3 +10,4 @@ serde.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tfk-protocol = { path = "../tfk-protocol" }
+tfk-rules = { path = "../tfk-rules" }

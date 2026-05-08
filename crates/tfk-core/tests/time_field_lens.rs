@@ -1,4 +1,6 @@
-use tfk_core::{ForecastScorer, TimeFieldContinuation, TimeFieldLensEngine};
+use tfk_core::{
+    lens_rule_facts, ForecastScorer, RuleFact, TimeFieldContinuation, TimeFieldLensEngine,
+};
 use tfk_protocol::{
     CandidateAction, ContinuationDelta, ContinuationRelationEdge, ContinuationRelationKind,
     ContinuationStatus, ContinuationType, ForecastRequest, LensRequest,
@@ -233,6 +235,143 @@ fn lens_ranking_uses_deterministic_tie_break_when_activation_matches() {
         .map(|continuation| continuation.id.as_str())
         .collect();
     assert_eq!(ids, vec!["a_tie", "b_tie", "c_tie"]);
+}
+
+#[test]
+fn rule_facts_promote_review_target_in_lens_ranking() {
+    let request = LensRequest {
+        query: "rules influence".to_string(),
+        horizon: vec!["next-action".to_string()],
+        perspective: vec!["research".to_string()],
+    };
+    let candidates = vec![
+        TimeFieldContinuation {
+            id: "cont_baseline".to_string(),
+            title: "rules influence baseline risk".to_string(),
+            summary: "ordinary unresolved risk without explicit rule markers".to_string(),
+            continuation_type: ContinuationType::Risk,
+            status: ContinuationStatus::Active,
+        },
+        TimeFieldContinuation {
+            id: "cont_review".to_string(),
+            title: "rules influence review target".to_string(),
+            summary: "risk_level=high; time_horizon=near; verify this before action".to_string(),
+            continuation_type: ContinuationType::Epistemic,
+            status: ContinuationStatus::Active,
+        },
+    ];
+
+    let baseline = TimeFieldLensEngine.generate_with_relations(&request, &candidates, &[], 0);
+    assert_eq!(baseline.active_continuations[0].id, "cont_baseline");
+
+    let rule_facts = lens_rule_facts(&request, &candidates);
+    assert!(rule_facts.iter().any(|fact| {
+        fact.predicate == "path_choice" && fact.args == vec!["cont_review", "review_now"]
+    }));
+    assert!(!rule_facts.iter().any(|fact| {
+        fact.predicate == "path_choice" && fact.args == vec!["cont_baseline", "review_now"]
+    }));
+
+    let with_rules = TimeFieldLensEngine.generate_with_relations_and_rule_facts(
+        &request,
+        &candidates,
+        &[],
+        &rule_facts,
+        0,
+    );
+
+    assert_eq!(with_rules.stance, "verify");
+    assert_eq!(with_rules.active_continuations[0].id, "cont_review");
+    assert!(
+        with_rules.active_continuations[0].activation
+            > with_rules.active_continuations[1].activation
+    );
+    assert_eq!(
+        with_rules.active_continuations[0].recommended_delta,
+        ContinuationDelta::Verify
+    );
+    assert!(with_rules.active_continuations[0]
+        .risk_if_ignored
+        .contains("rules-derived"));
+    let preferred = with_rules
+        .preferred_action
+        .as_ref()
+        .expect("preferred action");
+    assert!(preferred.name.contains("verify cont_review"));
+}
+
+#[test]
+fn rule_fact_marker_extraction_rejects_substrings_and_ambiguous_horizons() {
+    let request = LensRequest {
+        query: "rules influence".to_string(),
+        horizon: vec!["unknown".to_string(), "not now".to_string()],
+        perspective: vec!["research".to_string()],
+    };
+    let candidates = vec![
+        TimeFieldContinuation {
+            id: "cont_false_positive".to_string(),
+            title: "rules influence false positive".to_string(),
+            summary: "risk_level=highly; time_horizon=nearby; risk: high-latency".to_string(),
+            continuation_type: ContinuationType::Epistemic,
+            status: ContinuationStatus::Active,
+        },
+        TimeFieldContinuation {
+            id: "cont_exact_marker".to_string(),
+            title: "rules influence exact marker".to_string(),
+            summary: "risk_level=high; time_horizon=near; verify this before action".to_string(),
+            continuation_type: ContinuationType::Epistemic,
+            status: ContinuationStatus::Active,
+        },
+    ];
+
+    let facts = lens_rule_facts(&request, &candidates);
+
+    assert!(!facts.iter().any(|fact| {
+        fact.predicate == "needs_review" && fact.args == vec!["cont_false_positive"]
+    }));
+    assert!(!facts.iter().any(|fact| {
+        fact.predicate == "timing_attention" && fact.args == vec!["cont_false_positive"]
+    }));
+    assert!(facts.iter().any(|fact| {
+        fact.predicate == "path_choice" && fact.args == vec!["cont_exact_marker", "review_now"]
+    }));
+}
+
+#[test]
+fn explicit_rule_facts_can_drive_lens_without_marker_extraction() {
+    let request = lens_request("rules influence");
+    let candidates = vec![
+        TimeFieldContinuation {
+            id: "a_plain".to_string(),
+            title: "rules influence plain risk".to_string(),
+            summary: "higher base pressure".to_string(),
+            continuation_type: ContinuationType::Risk,
+            status: ContinuationStatus::Active,
+        },
+        TimeFieldContinuation {
+            id: "z_manual".to_string(),
+            title: "rules influence manual review".to_string(),
+            summary: "lower base pressure".to_string(),
+            continuation_type: ContinuationType::Epistemic,
+            status: ContinuationStatus::Active,
+        },
+    ];
+    let facts = vec![
+        RuleFact::new("needs_review", ["z_manual"]),
+        RuleFact::new("timing_attention", ["z_manual"]),
+        RuleFact::new("path_choice", ["z_manual", "review_now"]),
+    ];
+
+    let card = TimeFieldLensEngine.generate_with_relations_and_rule_facts(
+        &request,
+        &candidates,
+        &[],
+        &facts,
+        0,
+    );
+
+    assert_eq!(card.active_continuations[0].id, "z_manual");
+    assert!(card.active_continuations[0].activation > card.active_continuations[1].activation);
 }
 
 #[test]
