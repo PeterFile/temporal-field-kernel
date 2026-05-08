@@ -907,6 +907,81 @@ async fn lens_uses_persisted_active_continuation_relations() {
 }
 
 #[tokio::test]
+async fn lens_applies_rules_derived_review_pressure_from_continuation_markers() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let baseline = create_typed_continuation_via_api(
+        &app,
+        "rules influence baseline risk",
+        "ordinary unresolved risk without explicit rule markers",
+        ContinuationType::Risk,
+    )
+    .await;
+    let review = create_typed_continuation_via_api(
+        &app,
+        "rules influence review target",
+        "risk_level=high; time_horizon=near; verify this before action",
+        ContinuationType::Epistemic,
+    )
+    .await;
+
+    let response = app
+        .oneshot(json_request(
+            "POST",
+            "/v1/lens",
+            &LensRequest {
+                query: "rules influence".to_string(),
+                horizon: vec!["next-action".to_string()],
+                perspective: vec!["research".to_string()],
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<LensCard> = read_json(response).await;
+    assert!(envelope.ok);
+    assert!(envelope
+        .provenance
+        .iter()
+        .any(|provenance| { provenance.kind == "continuation" && provenance.id == baseline.id }));
+    assert!(envelope
+        .provenance
+        .iter()
+        .any(|provenance| { provenance.kind == "continuation" && provenance.id == review.id }));
+    let rule_fact_provenance: Vec<_> = envelope
+        .provenance
+        .iter()
+        .filter(|provenance| provenance.kind == "rule_fact")
+        .collect();
+    assert!(rule_fact_provenance.iter().any(|provenance| {
+        provenance.id.starts_with("path_choice(")
+            && provenance.id.contains(&review.id)
+            && provenance.id.contains("review_now")
+    }));
+    assert!(rule_fact_provenance.iter().all(|provenance| {
+        (provenance.id.starts_with("needs_review(") || provenance.id.starts_with("path_choice("))
+            && provenance.id.contains(&review.id)
+            && !provenance.id.contains(&baseline.id)
+    }));
+
+    let card = envelope.data.unwrap();
+    assert_eq!(card.stance, "verify");
+    assert_eq!(card.active_continuations.len(), 2);
+    assert_eq!(card.active_continuations[0].id, review.id);
+    assert_eq!(card.active_continuations[1].id, baseline.id);
+    assert!(card.active_continuations[0].activation > card.active_continuations[1].activation);
+    assert_eq!(
+        card.active_continuations[0].recommended_delta,
+        ContinuationDelta::Verify
+    );
+    assert!(card.active_continuations[0]
+        .risk_if_ignored
+        .contains("rules-derived"));
+}
+
+#[tokio::test]
 async fn lens_orders_active_continuations_by_persisted_relation_kind_ranking() {
     let tmp = tempdir().unwrap();
     let store = open_test_store(tmp.path());
@@ -1629,10 +1704,11 @@ async fn create_continuation_via_api(app: &axum::Router, title: &str) -> StoredC
     create_obligation_via_api(app, title, "relation test summary").await
 }
 
-async fn create_obligation_via_api(
+async fn create_typed_continuation_via_api(
     app: &axum::Router,
     title: &str,
     summary: &str,
+    continuation_type: ContinuationType,
 ) -> StoredContinuation {
     let response = app
         .clone()
@@ -1642,7 +1718,7 @@ async fn create_obligation_via_api(
             &ContinuationInput {
                 title: title.to_string(),
                 summary: summary.to_string(),
-                continuation_type: ContinuationType::Obligation,
+                continuation_type,
                 status: ContinuationStatus::Active,
                 parent_id: None,
                 raw_event_id: None,
@@ -1654,6 +1730,14 @@ async fn create_obligation_via_api(
     let envelope: ApiEnvelope<StoredContinuation> = read_json(response).await;
     assert!(envelope.ok);
     envelope.data.unwrap()
+}
+
+async fn create_obligation_via_api(
+    app: &axum::Router,
+    title: &str,
+    summary: &str,
+) -> StoredContinuation {
+    create_typed_continuation_via_api(app, title, summary, ContinuationType::Obligation).await
 }
 
 async fn create_relation_via_api(
