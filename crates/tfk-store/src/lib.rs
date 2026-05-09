@@ -14,7 +14,7 @@ use tfk_protocol::{
     RawEventInput, StoredCommitment, StoredContinuation, TemporalDeltaInput,
 };
 use tfk_vector::{
-    NoopVectorIndex, VectorDocument, VectorDocumentKind, VectorIndex, VectorIndexStatus,
+    NoopVectorIndex, VectorDocument, VectorDocumentKind, VectorHit, VectorIndex, VectorIndexStatus,
 };
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -85,6 +85,12 @@ pub struct StoredAdvisoryForecastSignal {
     pub action_name: Option<String>,
     pub reason: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredVectorContinuationHit {
+    pub continuation: StoredContinuation,
+    pub distance: f64,
 }
 
 impl Store {
@@ -259,9 +265,12 @@ impl Store {
             ],
         )?;
 
-        Ok(self
+        let stored = self
             .get_continuation(&id)?
-            .expect("inserted continuation must be readable"))
+            .expect("inserted continuation must be readable");
+        let document = VectorDocument::continuation(&stored.id, &stored.title, &stored.summary);
+        let _ = self.vector_index.upsert(&document);
+        Ok(stored)
     }
 
     pub fn create_commitment(
@@ -453,6 +462,58 @@ impl Store {
         });
         hits.truncate(CONTINUATION_SEARCH_RESULT_LIMIT);
         Ok(hits.into_iter().map(|hit| hit.id).collect())
+    }
+
+    pub fn search_vector_continuations_for_lens(
+        &self,
+        query: &str,
+    ) -> Result<Vec<StoredVectorContinuationHit>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let hits = match self
+            .vector_index
+            .search_text(query, CONTINUATION_SEARCH_RESULT_LIMIT)
+        {
+            Ok(hits) => hits,
+            Err(_) => return Ok(Vec::new()),
+        };
+        self.load_active_vector_continuation_hits(hits)
+    }
+
+    fn load_active_vector_continuation_hits(
+        &self,
+        hits: Vec<VectorHit>,
+    ) -> Result<Vec<StoredVectorContinuationHit>> {
+        let mut seen = HashSet::new();
+        let mut continuations = Vec::new();
+        for hit in hits {
+            if hit.kind != VectorDocumentKind::Continuation {
+                continue;
+            }
+            if !seen.insert(hit.source_id.clone()) {
+                continue;
+            }
+            let Some(continuation) = self.get_continuation(&hit.source_id)? else {
+                continue;
+            };
+            if continuation.status != ContinuationStatus::Active {
+                continue;
+            }
+            if !hit.distance.is_finite() {
+                continue;
+            }
+            continuations.push(StoredVectorContinuationHit {
+                continuation,
+                distance: sanitize_vector_distance(hit.distance),
+            });
+            if continuations.len() >= CONTINUATION_SEARCH_RESULT_LIMIT {
+                break;
+            }
+        }
+        Ok(continuations)
     }
 
     fn collect_literal_continuation_candidates(
@@ -861,6 +922,14 @@ impl Store {
             hits.push(row?);
         }
         Ok(hits)
+    }
+}
+
+fn sanitize_vector_distance(distance: f64) -> f64 {
+    if distance.is_finite() {
+        distance.max(0.0)
+    } else {
+        f64::MAX
     }
 }
 

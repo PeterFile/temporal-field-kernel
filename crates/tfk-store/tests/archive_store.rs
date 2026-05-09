@@ -106,6 +106,191 @@ fn vector_upsert_failure_does_not_fail_raw_event_append() {
 }
 
 #[test]
+fn creating_continuation_upserts_continuation_vector_document() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let index = Arc::new(RecordingVectorIndex::default());
+    let store = Store::open_with_vector_index(
+        data_dir.join("tfk.db"),
+        data_dir.join("archive"),
+        index.clone(),
+    )
+    .unwrap();
+
+    let stored = store
+        .create_continuation(&ContinuationInput {
+            title: "Vector indexed continuation".to_string(),
+            summary: "title plus summary becomes lens text".to_string(),
+            continuation_type: ContinuationType::Obligation,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+
+    let documents = index.documents.lock().unwrap();
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].source_id, stored.id);
+    assert_eq!(documents[0].kind, VectorDocumentKind::Continuation);
+    assert_eq!(
+        documents[0].text,
+        "Vector indexed continuation\ntitle plus summary becomes lens text"
+    );
+    assert!(documents[0].embedding.is_none());
+}
+
+#[test]
+fn vector_upsert_failure_does_not_fail_continuation_create() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let store = Store::open_with_vector_index(
+        data_dir.join("tfk.db"),
+        data_dir.join("archive"),
+        Arc::new(FailingVectorIndex),
+    )
+    .unwrap();
+
+    let stored = store
+        .create_continuation(&ContinuationInput {
+            title: "Continuation survives vector backend failure".to_string(),
+            summary: "create must be fail-soft".to_string(),
+            continuation_type: ContinuationType::Risk,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+
+    let loaded = store.get_continuation(&stored.id).unwrap().unwrap();
+    assert_eq!(loaded.title, "Continuation survives vector backend failure");
+    assert_eq!(loaded.summary, "create must be fail-soft");
+}
+
+#[test]
+fn vector_lens_continuation_hits_filter_to_existing_active_continuations() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let index = Arc::new(InjectedTextVectorIndex::default());
+    let store = Store::open_with_vector_index(
+        data_dir.join("tfk.db"),
+        data_dir.join("archive"),
+        index.clone(),
+    )
+    .unwrap();
+    let active = store
+        .create_continuation(&ContinuationInput {
+            title: "active vector target".to_string(),
+            summary: "loaded by source_id".to_string(),
+            continuation_type: ContinuationType::Obligation,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    let closed = store
+        .create_continuation(&ContinuationInput {
+            title: "closed stale vector target".to_string(),
+            summary: "must not resurrect".to_string(),
+            continuation_type: ContinuationType::Obligation,
+            status: ContinuationStatus::Closed,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    let retired = store
+        .create_continuation(&ContinuationInput {
+            title: "retired stale vector target".to_string(),
+            summary: "must not resurrect".to_string(),
+            continuation_type: ContinuationType::Obligation,
+            status: ContinuationStatus::Retired,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    index.set_hits(vec![
+        VectorHit {
+            source_id: "evt_wrong_kind".to_string(),
+            kind: VectorDocumentKind::RawEvent,
+            distance: 0.0,
+        },
+        VectorHit {
+            source_id: active.id.clone(),
+            kind: VectorDocumentKind::Continuation,
+            distance: 0.05,
+        },
+        VectorHit {
+            source_id: active.id.clone(),
+            kind: VectorDocumentKind::Continuation,
+            distance: 0.07,
+        },
+        VectorHit {
+            source_id: closed.id.clone(),
+            kind: VectorDocumentKind::Continuation,
+            distance: 0.01,
+        },
+        VectorHit {
+            source_id: retired.id.clone(),
+            kind: VectorDocumentKind::Continuation,
+            distance: 0.02,
+        },
+        VectorHit {
+            source_id: "cont_missing".to_string(),
+            kind: VectorDocumentKind::Continuation,
+            distance: 0.03,
+        },
+    ]);
+
+    let hits = store
+        .search_vector_continuations_for_lens("vector-only query")
+        .unwrap();
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].continuation.id, active.id);
+    assert_eq!(hits[0].distance, 0.05);
+}
+
+#[test]
+fn vector_lens_continuation_hits_ignore_non_finite_distances() {
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let index = Arc::new(InjectedTextVectorIndex::default());
+    let store = Store::open_with_vector_index(
+        data_dir.join("tfk.db"),
+        data_dir.join("archive"),
+        index.clone(),
+    )
+    .unwrap();
+    let active = store
+        .create_continuation(&ContinuationInput {
+            title: "active vector target".to_string(),
+            summary: "non-finite distance must not activate".to_string(),
+            continuation_type: ContinuationType::Obligation,
+            status: ContinuationStatus::Active,
+            parent_id: None,
+            raw_event_id: None,
+        })
+        .unwrap();
+    index.set_hits(vec![
+        VectorHit {
+            source_id: active.id.clone(),
+            kind: VectorDocumentKind::Continuation,
+            distance: f64::NAN,
+        },
+        VectorHit {
+            source_id: active.id,
+            kind: VectorDocumentKind::Continuation,
+            distance: f64::INFINITY,
+        },
+    ]);
+
+    let hits = store
+        .search_vector_continuations_for_lens("vector-only query")
+        .unwrap();
+
+    assert!(hits.is_empty());
+}
+
+#[test]
 fn fts_search_finds_archived_event_content() {
     let tmp = tempdir().unwrap();
     let store = open_test_store(tmp.path());
@@ -1225,6 +1410,46 @@ impl VectorIndex for RecordingVectorIndex {
         _limit: usize,
     ) -> tfk_vector::Result<Vec<VectorHit>> {
         Ok(Vec::new())
+    }
+}
+
+#[derive(Debug, Default)]
+struct InjectedTextVectorIndex {
+    hits: Mutex<Vec<VectorHit>>,
+}
+
+impl InjectedTextVectorIndex {
+    fn set_hits(&self, hits: Vec<VectorHit>) {
+        *self.hits.lock().unwrap() = hits;
+    }
+}
+
+impl VectorIndex for InjectedTextVectorIndex {
+    fn status(&self) -> VectorIndexStatus {
+        VectorIndexStatus::available("injected-text")
+    }
+
+    fn upsert(&self, _document: &VectorDocument) -> tfk_vector::Result<VectorIndexOutcome> {
+        Ok(VectorIndexOutcome::Indexed)
+    }
+
+    fn search(
+        &self,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> tfk_vector::Result<Vec<VectorHit>> {
+        Ok(Vec::new())
+    }
+
+    fn search_text(&self, _query: &str, limit: usize) -> tfk_vector::Result<Vec<VectorHit>> {
+        Ok(self
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect())
     }
 }
 

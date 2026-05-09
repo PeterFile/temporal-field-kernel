@@ -9,7 +9,7 @@ use axum::{
 use serde_json::{json, Value};
 use tfk_core::{
     lens_rule_facts, ForecastScorer, PreflightScorer, RuleFact, TimeFieldContinuation,
-    TimeFieldLensEngine,
+    TimeFieldLensEngine, TimeFieldVectorInfluence,
 };
 use tfk_model_client::ForecastPredictionClient;
 use tfk_protocol::{
@@ -427,6 +427,7 @@ async fn lens_handler(
         commitment_constraints,
         relations,
         promoted_raw_event_ids,
+        vector_influences,
         advisory_signals,
     ) = {
         let store = state
@@ -446,6 +447,24 @@ async fn lens_handler(
                 .map_err(|error| internal_error(error.to_string()))?
             {
                 continuations.push(continuation);
+            }
+        }
+        let vector_hits = store
+            .search_vector_continuations_for_lens(&request.query)
+            .map_err(|error| internal_error(error.to_string()))?;
+        let vector_influences: Vec<_> = vector_hits
+            .iter()
+            .map(|hit| TimeFieldVectorInfluence {
+                continuation_id: hit.continuation.id.clone(),
+                strength: vector_strength_from_distance(hit.distance),
+            })
+            .collect();
+        for hit in vector_hits {
+            if !continuations
+                .iter()
+                .any(|stored| stored.id == hit.continuation.id)
+            {
+                continuations.push(hit.continuation);
             }
         }
         let continuation_ids: Vec<_> = continuations
@@ -491,6 +510,7 @@ async fn lens_handler(
                 commitment_constraints,
                 relations,
                 Vec::new(),
+                vector_influences,
                 advisory_signals,
             )
         } else {
@@ -516,6 +536,7 @@ async fn lens_handler(
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                     advisory_signals,
                 )
             } else {
@@ -535,6 +556,7 @@ async fn lens_handler(
                     commitment_constraints,
                     relations,
                     hits,
+                    Vec::new(),
                     advisory_signals,
                 )
             }
@@ -567,13 +589,15 @@ async fn lens_handler(
             })
             .collect();
         let rule_facts = lens_rule_facts(&request, &time_field_continuations);
-        let card = TimeFieldLensEngine.generate_with_relations_and_rule_facts(
-            &request,
-            &time_field_continuations,
-            &relations,
-            &rule_facts,
-            0,
-        );
+        let card = TimeFieldLensEngine
+            .generate_with_relations_and_rule_facts_and_vector_influences(
+                &request,
+                &time_field_continuations,
+                &relations,
+                &rule_facts,
+                &vector_influences,
+                0,
+            );
         (card, rule_facts)
     };
     let mut commitment_provenance = Vec::new();
@@ -630,6 +654,13 @@ async fn lens_handler(
     envelope.provenance = provenance;
 
     Ok(Json(envelope))
+}
+
+fn vector_strength_from_distance(distance: f64) -> f64 {
+    if !distance.is_finite() {
+        return 0.0;
+    }
+    1.0 / (1.0 + distance.max(0.0))
 }
 
 fn rule_fact_provenance(rule_facts: &[RuleFact]) -> Vec<ProvenanceRef> {

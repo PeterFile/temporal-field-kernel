@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tfk_protocol::{
     CandidateAction, ContinuationDelta, ContinuationRelationEdge, ContinuationRelationKind,
     ContinuationStatus, ContinuationType, ForecastRequest, ForecastResult, LensActiveContinuation,
@@ -15,6 +17,12 @@ pub struct TimeFieldContinuation {
     pub summary: String,
     pub continuation_type: ContinuationType,
     pub status: ContinuationStatus,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeFieldVectorInfluence {
+    pub continuation_id: String,
+    pub strength: f64,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -54,10 +62,56 @@ impl TimeFieldLensEngine {
         rule_facts: &[RuleFact],
         raw_event_count: usize,
     ) -> LensCard {
+        self.generate_with_relations_and_rule_facts_and_vector_influences(
+            request,
+            continuations,
+            relations,
+            rule_facts,
+            &[],
+            raw_event_count,
+        )
+    }
+
+    pub fn generate_with_vector_influences(
+        &self,
+        request: &LensRequest,
+        continuations: &[TimeFieldContinuation],
+        vector_influences: &[TimeFieldVectorInfluence],
+        raw_event_count: usize,
+    ) -> LensCard {
+        self.generate_with_relations_and_rule_facts_and_vector_influences(
+            request,
+            continuations,
+            &[],
+            &[],
+            vector_influences,
+            raw_event_count,
+        )
+    }
+
+    pub fn generate_with_relations_and_rule_facts_and_vector_influences(
+        &self,
+        request: &LensRequest,
+        continuations: &[TimeFieldContinuation],
+        relations: &[ContinuationRelationEdge],
+        rule_facts: &[RuleFact],
+        vector_influences: &[TimeFieldVectorInfluence],
+        raw_event_count: usize,
+    ) -> LensCard {
+        let vector_influence_by_id = vector_influence_by_id(vector_influences);
         let mut active: Vec<_> = continuations
             .iter()
             .filter(|continuation| !is_closed(continuation.status))
-            .filter_map(|continuation| active_continuation_for(continuation, request))
+            .filter_map(|continuation| {
+                active_continuation_for(
+                    continuation,
+                    request,
+                    vector_influence_by_id
+                        .get(continuation.id.as_str())
+                        .copied()
+                        .unwrap_or(0.0),
+                )
+            })
             .collect();
         apply_relation_kind_activation(&mut active, relations);
         apply_rule_fact_activation(&mut active, rule_facts);
@@ -242,6 +296,21 @@ fn is_marker_ident(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
 }
 
+fn vector_influence_by_id(vector_influences: &[TimeFieldVectorInfluence]) -> HashMap<&str, f64> {
+    let mut by_id = HashMap::new();
+    for influence in vector_influences {
+        let strength = clamp01(influence.strength);
+        if strength <= 0.0 {
+            continue;
+        }
+        by_id
+            .entry(influence.continuation_id.as_str())
+            .and_modify(|existing: &mut f64| *existing = existing.max(strength))
+            .or_insert(strength);
+    }
+    by_id
+}
+
 fn apply_relation_kind_activation(
     active: &mut [LensActiveContinuation],
     relations: &[ContinuationRelationEdge],
@@ -355,17 +424,22 @@ fn relation_boundaries(
 fn active_continuation_for(
     continuation: &TimeFieldContinuation,
     request: &LensRequest,
+    vector_strength: f64,
 ) -> Option<LensActiveContinuation> {
     let semantic_match = semantic_match(continuation, &request.query);
-    if semantic_match <= 0.0 {
+    let vector_match = vector_match_strength(vector_strength);
+    if semantic_match <= 0.0 && vector_match <= 0.0 {
         return None;
     }
     let pressure = pressure(continuation);
-    let activation = semantic_match
+    let mut activation = semantic_match.max(vector_match)
         * horizon_overlap(continuation, &request.horizon)
         * perspective_weight(continuation, &request.perspective)
         * pressure
         * confidence(continuation);
+    if semantic_match > 0.0 && vector_match > 0.0 {
+        activation *= 1.0 + (0.05 * clamp01(vector_strength));
+    }
     if activation <= 0.0 {
         return None;
     }
@@ -379,6 +453,15 @@ fn active_continuation_for(
         risk_if_ignored: risk_if_ignored(continuation.continuation_type).to_string(),
         recommended_delta: recommended_delta(continuation.continuation_type),
     })
+}
+
+fn vector_match_strength(strength: f64) -> f64 {
+    let strength = clamp01(strength);
+    if strength <= 0.0 {
+        0.0
+    } else {
+        0.35 + (0.10 * strength)
+    }
 }
 
 fn action_card(
