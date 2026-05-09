@@ -1028,6 +1028,7 @@ dependencies = [
  "tfk-model-client",
  "tfk-protocol",
  "tfk-store",
+ "tfk-vector",
  "tokio",
  "tower",
 ]

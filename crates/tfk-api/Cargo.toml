@@ -17,4 +17,5 @@ tower.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tfk-vector = { path = "../tfk-vector" }
 tokio.workspace = true

@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use axum::{
     body::{to_bytes, Body},
     http::{Request, StatusCode},
@@ -14,6 +16,10 @@ use tfk_protocol::{
     StoredContinuation, TemporalDeltaInput,
 };
 use tfk_store::{Store, StoredAdvisoryForecastSignal, StoredRawEvent};
+use tfk_vector::{
+    VectorDocument, VectorDocumentKind, VectorHit, VectorIndex, VectorIndexOutcome,
+    VectorIndexStatus,
+};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -282,6 +288,152 @@ async fn lens_endpoint_treats_backslash_query_as_literal_not_semantic_tokens() {
         .provenance
         .iter()
         .any(|provenance| provenance.kind == "continuation" && provenance.id == exact.id));
+}
+
+#[tokio::test]
+async fn lens_endpoint_noop_vector_index_preserves_default_no_match_behavior() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    create_typed_continuation_via_api(
+        &app,
+        "opaque codename",
+        "no shared words here",
+        ContinuationType::Obligation,
+    )
+    .await;
+
+    let response = app
+        .oneshot(json_request(
+            "POST",
+            "/v1/lens",
+            &LensRequest {
+                query: "needleless vector query".to_string(),
+                horizon: Vec::new(),
+                perspective: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<LensCard> = read_json(response).await;
+    assert!(envelope.ok);
+    assert!(envelope.provenance.is_empty());
+    let card = envelope.data.unwrap();
+    assert_eq!(card.stance, "scaffold");
+    assert!(card.active_continuations.is_empty());
+}
+
+#[tokio::test]
+async fn lens_endpoint_surfaces_injected_vector_continuation_hit_without_text_match() {
+    let tmp = tempdir().unwrap();
+    let index = Arc::new(InjectedTextVectorIndex::default());
+    let store = open_test_store_with_vector(tmp.path(), index.clone());
+    let app = tfk_api::router_with_store(store);
+    let vector_target = create_typed_continuation_via_api(
+        &app,
+        "opaque codename",
+        "no shared words here",
+        ContinuationType::Obligation,
+    )
+    .await;
+    create_typed_continuation_via_api(
+        &app,
+        "unrelated candidate",
+        "also has no query match",
+        ContinuationType::Risk,
+    )
+    .await;
+    index.set_hits(vec![VectorHit {
+        source_id: vector_target.id.clone(),
+        kind: VectorDocumentKind::Continuation,
+        distance: 0.0,
+    }]);
+
+    let response = app
+        .oneshot(json_request(
+            "POST",
+            "/v1/lens",
+            &LensRequest {
+                query: "needleless vector query".to_string(),
+                horizon: Vec::new(),
+                perspective: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<LensCard> = read_json(response).await;
+    assert!(envelope.ok);
+    assert!(envelope.provenance.iter().any(|provenance| {
+        provenance.kind == "continuation" && provenance.id == vector_target.id
+    }));
+    let card = envelope.data.unwrap();
+    assert_eq!(card.stance, "act");
+    assert_eq!(card.active_continuations.len(), 1);
+    assert_eq!(card.active_continuations[0].id, vector_target.id);
+}
+
+#[tokio::test]
+async fn lens_endpoint_ignores_stale_vector_hits_to_closed_and_retired_continuations() {
+    let tmp = tempdir().unwrap();
+    let index = Arc::new(InjectedTextVectorIndex::default());
+    let store = open_test_store_with_vector(tmp.path(), index.clone());
+    let app = tfk_api::router_with_store(store);
+    let closed = create_continuation_with_status_via_api(
+        &app,
+        "closed opaque codename",
+        "closed stale hit",
+        ContinuationType::Obligation,
+        ContinuationStatus::Closed,
+    )
+    .await;
+    let retired = create_continuation_with_status_via_api(
+        &app,
+        "retired opaque codename",
+        "retired stale hit",
+        ContinuationType::Risk,
+        ContinuationStatus::Retired,
+    )
+    .await;
+    index.set_hits(vec![
+        VectorHit {
+            source_id: closed.id.clone(),
+            kind: VectorDocumentKind::Continuation,
+            distance: 0.0,
+        },
+        VectorHit {
+            source_id: retired.id.clone(),
+            kind: VectorDocumentKind::Continuation,
+            distance: 0.1,
+        },
+    ]);
+
+    let response = app
+        .oneshot(json_request(
+            "POST",
+            "/v1/lens",
+            &LensRequest {
+                query: "needleless vector query".to_string(),
+                horizon: Vec::new(),
+                perspective: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<LensCard> = read_json(response).await;
+    assert!(envelope.ok);
+    assert!(!envelope
+        .provenance
+        .iter()
+        .any(|provenance| provenance.id == closed.id || provenance.id == retired.id));
+    let card = envelope.data.unwrap();
+    assert_eq!(card.stance, "scaffold");
+    assert!(card.active_continuations.is_empty());
 }
 
 #[tokio::test]
@@ -1892,6 +2044,11 @@ fn open_test_store(root: &std::path::Path) -> Store {
     Store::open(data_dir.join("tfk.db"), data_dir.join("archive")).unwrap()
 }
 
+fn open_test_store_with_vector(root: &std::path::Path, index: Arc<dyn VectorIndex>) -> Store {
+    let data_dir = root.join("data");
+    Store::open_with_vector_index(data_dir.join("tfk.db"), data_dir.join("archive"), index).unwrap()
+}
+
 async fn create_commitment_via_api(
     app: &axum::Router,
     request: CommitRequest,
@@ -1936,6 +2093,23 @@ async fn create_typed_continuation_via_api(
     summary: &str,
     continuation_type: ContinuationType,
 ) -> StoredContinuation {
+    create_continuation_with_status_via_api(
+        app,
+        title,
+        summary,
+        continuation_type,
+        ContinuationStatus::Active,
+    )
+    .await
+}
+
+async fn create_continuation_with_status_via_api(
+    app: &axum::Router,
+    title: &str,
+    summary: &str,
+    continuation_type: ContinuationType,
+    status: ContinuationStatus,
+) -> StoredContinuation {
     let response = app
         .clone()
         .oneshot(json_request(
@@ -1945,7 +2119,7 @@ async fn create_typed_continuation_via_api(
                 title: title.to_string(),
                 summary: summary.to_string(),
                 continuation_type,
-                status: ContinuationStatus::Active,
+                status,
                 parent_id: None,
                 raw_event_id: None,
             },
@@ -1983,6 +2157,46 @@ async fn create_relation_via_api(
     let envelope: ApiEnvelope<ContinuationRelationEdge> = read_json(response).await;
     assert!(envelope.ok);
     envelope.data.unwrap()
+}
+
+#[derive(Debug, Default)]
+struct InjectedTextVectorIndex {
+    hits: Mutex<Vec<VectorHit>>,
+}
+
+impl InjectedTextVectorIndex {
+    fn set_hits(&self, hits: Vec<VectorHit>) {
+        *self.hits.lock().unwrap() = hits;
+    }
+}
+
+impl VectorIndex for InjectedTextVectorIndex {
+    fn status(&self) -> VectorIndexStatus {
+        VectorIndexStatus::available("injected-text")
+    }
+
+    fn upsert(&self, _document: &VectorDocument) -> tfk_vector::Result<VectorIndexOutcome> {
+        Ok(VectorIndexOutcome::Indexed)
+    }
+
+    fn search(
+        &self,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> tfk_vector::Result<Vec<VectorHit>> {
+        Ok(Vec::new())
+    }
+
+    fn search_text(&self, _query: &str, limit: usize) -> tfk_vector::Result<Vec<VectorHit>> {
+        Ok(self
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect())
+    }
 }
 
 fn forecast_request() -> ForecastRequest {

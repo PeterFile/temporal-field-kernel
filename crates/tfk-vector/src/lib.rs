@@ -37,6 +37,19 @@ impl VectorDocument {
         }
     }
 
+    pub fn continuation(
+        source_id: impl Into<String>,
+        title: impl AsRef<str>,
+        summary: impl AsRef<str>,
+    ) -> Self {
+        Self {
+            source_id: source_id.into(),
+            kind: VectorDocumentKind::Continuation,
+            text: format!("{}\n{}", title.as_ref(), summary.as_ref()),
+            embedding: None,
+        }
+    }
+
     pub fn with_embedding(mut self, embedding: Vec<f32>) -> Self {
         self.embedding = Some(embedding);
         self
@@ -110,6 +123,9 @@ pub trait VectorIndex: std::fmt::Debug + Send + Sync {
     fn status(&self) -> VectorIndexStatus;
     fn upsert(&self, document: &VectorDocument) -> Result<VectorIndexOutcome>;
     fn search(&self, query_embedding: &[f32], limit: usize) -> Result<Vec<VectorHit>>;
+    fn search_text(&self, _query: &str, _limit: usize) -> Result<Vec<VectorHit>> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +159,10 @@ impl VectorIndex for NoopVectorIndex {
     }
 
     fn search(&self, _query_embedding: &[f32], _limit: usize) -> Result<Vec<VectorHit>> {
+        Ok(Vec::new())
+    }
+
+    fn search_text(&self, _query: &str, _limit: usize) -> Result<Vec<VectorHit>> {
         Ok(Vec::new())
     }
 }
@@ -212,6 +232,17 @@ mod tests {
             }
         );
         assert!(index.search(&[0.1, 0.2], 10).unwrap().is_empty());
+        assert!(index.search_text("lens query", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn continuation_document_uses_title_plus_summary_without_embedding() {
+        let document = VectorDocument::continuation("cont_1", "Release gate", "verify before ship");
+
+        assert_eq!(document.source_id, "cont_1");
+        assert_eq!(document.kind, VectorDocumentKind::Continuation);
+        assert_eq!(document.text, "Release gate\nverify before ship");
+        assert!(document.embedding.is_none());
     }
 
     #[test]

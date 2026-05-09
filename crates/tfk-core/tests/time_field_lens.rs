@@ -1,5 +1,6 @@
 use tfk_core::{
     lens_rule_facts, ForecastScorer, RuleFact, TimeFieldContinuation, TimeFieldLensEngine,
+    TimeFieldVectorInfluence,
 };
 use tfk_protocol::{
     CandidateAction, ContinuationDelta, ContinuationRelationEdge, ContinuationRelationKind,
@@ -230,6 +231,102 @@ fn literal_backslash_query_does_not_expand_to_semantic_tokens() {
         .map(|continuation| continuation.id.as_str())
         .collect();
     assert_eq!(ids, vec!["target_literal"]);
+}
+
+#[test]
+fn lens_without_vector_influence_preserves_noop_behavior_for_unmatched_continuation() {
+    let request = lens_request("needleless vector query");
+    let candidates = vec![TimeFieldContinuation {
+        id: "cont_unmatched".to_string(),
+        title: "opaque codename".to_string(),
+        summary: "no shared words here".to_string(),
+        continuation_type: ContinuationType::Obligation,
+        status: ContinuationStatus::Active,
+    }];
+
+    let card = TimeFieldLensEngine.generate(&request, &candidates, 0);
+
+    assert_eq!(card.stance, "wait");
+    assert!(card.active_continuations.is_empty());
+    assert!(card.preferred_action.is_none());
+}
+
+#[test]
+fn vector_influence_surfaces_non_matching_active_continuation() {
+    let request = lens_request("needleless vector query");
+    let candidates = vec![
+        TimeFieldContinuation {
+            id: "cont_vector".to_string(),
+            title: "opaque codename".to_string(),
+            summary: "no shared words here".to_string(),
+            continuation_type: ContinuationType::Obligation,
+            status: ContinuationStatus::Active,
+        },
+        TimeFieldContinuation {
+            id: "cont_noise".to_string(),
+            title: "unrelated candidate".to_string(),
+            summary: "also has no query match".to_string(),
+            continuation_type: ContinuationType::Risk,
+            status: ContinuationStatus::Active,
+        },
+    ];
+    let vector_influences = vec![TimeFieldVectorInfluence {
+        continuation_id: "cont_vector".to_string(),
+        strength: 1.0,
+    }];
+
+    let card = TimeFieldLensEngine.generate_with_vector_influences(
+        &request,
+        &candidates,
+        &vector_influences,
+        0,
+    );
+
+    assert_eq!(card.stance, "act");
+    assert_eq!(card.active_continuations.len(), 1);
+    assert_eq!(card.active_continuations[0].id, "cont_vector");
+    assert!(card.active_continuations[0].activation > 0.0);
+}
+
+#[test]
+fn vector_influence_does_not_resurrect_closed_or_retired_continuations() {
+    let request = lens_request("needleless vector query");
+    let candidates = vec![
+        TimeFieldContinuation {
+            id: "cont_closed".to_string(),
+            title: "opaque closed codename".to_string(),
+            summary: "closed stale hit".to_string(),
+            continuation_type: ContinuationType::Obligation,
+            status: ContinuationStatus::Closed,
+        },
+        TimeFieldContinuation {
+            id: "cont_retired".to_string(),
+            title: "opaque retired codename".to_string(),
+            summary: "retired stale hit".to_string(),
+            continuation_type: ContinuationType::Risk,
+            status: ContinuationStatus::Retired,
+        },
+    ];
+    let vector_influences = vec![
+        TimeFieldVectorInfluence {
+            continuation_id: "cont_closed".to_string(),
+            strength: 1.0,
+        },
+        TimeFieldVectorInfluence {
+            continuation_id: "cont_retired".to_string(),
+            strength: 1.0,
+        },
+    ];
+
+    let card = TimeFieldLensEngine.generate_with_vector_influences(
+        &request,
+        &candidates,
+        &vector_influences,
+        0,
+    );
+
+    assert_eq!(card.stance, "wait");
+    assert!(card.active_continuations.is_empty());
 }
 
 #[test]
