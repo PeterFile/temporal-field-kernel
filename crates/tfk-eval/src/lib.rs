@@ -1,13 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tfk_core::{
     lens_rule_facts, ForecastScorer, PreflightScorer, RuleFact, TimeFieldContinuation,
-    TimeFieldLensEngine,
+    TimeFieldLensEngine, TimeFieldVectorInfluence,
 };
 use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{
@@ -17,6 +18,10 @@ use tfk_protocol::{
     LensCard, LensRequest, PreflightSignals, RawEventInput, TemporalDeltaInput,
 };
 use tfk_store::Store;
+use tfk_vector::{
+    VectorDocument, VectorDocumentKind, VectorError, VectorHit, VectorIndex, VectorIndexOutcome,
+    VectorIndexStatus,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplaySummary {
@@ -137,6 +142,22 @@ pub struct RulesLensInfluenceReplaySummary {
     pub expected_rule_fact_predicates: Vec<String>,
     pub actual_rule_fact_predicates: Vec<String>,
     pub rule_fact_ids: Vec<String>,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VectorLensInfluenceReplaySummary {
+    pub fixture_path: String,
+    pub continuation_count: usize,
+    pub vector_hit_count: usize,
+    pub expected_top_title: String,
+    pub actual_top_title: String,
+    pub expected_top_source: String,
+    pub actual_top_source: String,
+    pub expected_ordered_titles: Vec<String>,
+    pub actual_ordered_titles: Vec<String>,
+    pub expected_vector_hit_labels: Vec<String>,
+    pub actual_vector_hit_labels: Vec<String>,
     pub ok: bool,
 }
 
@@ -789,6 +810,96 @@ pub fn replay_rules_lens_influence_fixture(
     })
 }
 
+pub fn replay_vector_lens_influence_fixture(
+    path: &Path,
+) -> anyhow::Result<VectorLensInfluenceReplaySummary> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open fixture {}", path.display()))?;
+    let fixture: VectorLensInfluenceFixture = serde_json::from_reader(file)
+        .with_context(|| format!("invalid fixture {}", path.display()))?;
+    let tmp = tempfile::tempdir().context("failed to create vector-lens temp directory")?;
+    let data_dir = tmp.path().join("store");
+    let vector_index = Arc::new(FixtureVectorIndex::new(
+        &fixture.lens.query,
+        fixture.fake_vector_hits.clone(),
+    ));
+    let store = Store::open_with_vector_index(
+        data_dir.join("tfk.db"),
+        data_dir.join("archive"),
+        vector_index.clone(),
+    )
+    .context("failed to open vector-lens store")?;
+
+    let continuation_count = fixture.continuations.len();
+    let mut label_by_id = HashMap::new();
+    for continuation in &fixture.continuations {
+        let stored = store
+            .create_continuation(&continuation.input)
+            .with_context(|| format!("failed to create continuation {}", continuation.label))?;
+        vector_index.set_source_id(&continuation.label, stored.id.clone())?;
+        label_by_id.insert(stored.id, continuation.label.clone());
+    }
+
+    let vector_hits = store
+        .search_vector_continuations_for_lens(&fixture.lens.query)
+        .context("failed to replay fake vector continuation hits")?;
+    let vector_hit_count = vector_hits.len();
+    let vector_hit_ids: HashSet<_> = vector_hits
+        .iter()
+        .map(|hit| hit.continuation.id.clone())
+        .collect();
+    let actual_vector_hit_labels: Vec<_> = vector_hits
+        .iter()
+        .filter_map(|hit| label_by_id.get(&hit.continuation.id).cloned())
+        .collect();
+
+    let card = lens_from_store(&store, &fixture.lens)
+        .context("failed to run vector-backed lens influence")?;
+    let actual_ordered_titles: Vec<_> = card
+        .active_continuations
+        .iter()
+        .map(|continuation| continuation.title.clone())
+        .collect();
+    let actual_top = card.active_continuations.first();
+    let actual_top_title = actual_top
+        .map(|continuation| continuation.title.clone())
+        .unwrap_or_default();
+    let actual_top_source = actual_top
+        .map(|continuation| {
+            if vector_hit_ids.contains(&continuation.id) {
+                "vector"
+            } else {
+                "lexical"
+            }
+        })
+        .unwrap_or("none")
+        .to_string();
+
+    let expected_top_title = fixture.expected.top_title;
+    let expected_top_source = fixture.expected.top_source;
+    let expected_ordered_titles = fixture.expected.ordered_titles;
+    let expected_vector_hit_labels = fixture.expected.vector_hit_labels;
+    let ok = actual_top_title == expected_top_title
+        && actual_top_source == expected_top_source
+        && actual_ordered_titles == expected_ordered_titles
+        && actual_vector_hit_labels == expected_vector_hit_labels;
+
+    Ok(VectorLensInfluenceReplaySummary {
+        fixture_path: path.to_string_lossy().to_string(),
+        continuation_count,
+        vector_hit_count,
+        expected_top_title,
+        actual_top_title,
+        expected_top_source,
+        actual_top_source,
+        expected_ordered_titles,
+        actual_ordered_titles,
+        expected_vector_hit_labels,
+        actual_vector_hit_labels,
+        ok,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct ForecastFixture {
     request: ForecastRequest,
@@ -977,6 +1088,101 @@ struct RulesLensInfluenceExpected {
 }
 
 #[derive(Debug, Deserialize)]
+struct VectorLensInfluenceFixture {
+    continuations: Vec<VectorLensInfluenceContinuation>,
+    lens: LensRequest,
+    #[serde(default)]
+    fake_vector_hits: Vec<VectorLensInfluenceHit>,
+    expected: VectorLensInfluenceExpected,
+}
+
+#[derive(Debug, Deserialize)]
+struct VectorLensInfluenceContinuation {
+    label: String,
+    input: tfk_protocol::ContinuationInput,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct VectorLensInfluenceHit {
+    label: String,
+    distance: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct VectorLensInfluenceExpected {
+    top_title: String,
+    top_source: String,
+    ordered_titles: Vec<String>,
+    vector_hit_labels: Vec<String>,
+}
+
+#[derive(Debug)]
+struct FixtureVectorIndex {
+    query: String,
+    hits: Vec<VectorLensInfluenceHit>,
+    source_ids_by_label: Mutex<HashMap<String, String>>,
+}
+
+impl FixtureVectorIndex {
+    fn new(query: &str, hits: Vec<VectorLensInfluenceHit>) -> Self {
+        Self {
+            query: query.trim().to_string(),
+            hits,
+            source_ids_by_label: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn set_source_id(&self, label: &str, source_id: String) -> anyhow::Result<()> {
+        self.source_ids_by_label
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fixture vector index lock poisoned"))?
+            .insert(label.to_string(), source_id);
+        Ok(())
+    }
+}
+
+impl VectorIndex for FixtureVectorIndex {
+    fn status(&self) -> VectorIndexStatus {
+        VectorIndexStatus::available("fixture")
+    }
+
+    fn upsert(&self, _document: &VectorDocument) -> tfk_vector::Result<VectorIndexOutcome> {
+        Ok(VectorIndexOutcome::Indexed)
+    }
+
+    fn search(
+        &self,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> tfk_vector::Result<Vec<VectorHit>> {
+        Ok(Vec::new())
+    }
+
+    fn search_text(&self, query: &str, limit: usize) -> tfk_vector::Result<Vec<VectorHit>> {
+        if query.trim() != self.query {
+            return Ok(Vec::new());
+        }
+
+        let source_ids = self
+            .source_ids_by_label
+            .lock()
+            .map_err(|_| VectorError::Backend("fixture vector index lock poisoned".to_string()))?;
+        Ok(self
+            .hits
+            .iter()
+            .take(limit)
+            .filter_map(|hit| {
+                source_ids.get(&hit.label).map(|source_id| VectorHit {
+                    source_id: source_id.clone(),
+                    kind: VectorDocumentKind::Continuation,
+                    distance: hit.distance,
+                })
+            })
+            .collect())
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct LensAdvisorySignalFixture {
     continuations: Vec<LensAdvisorySignalContinuation>,
     advisory_signals: Vec<AdvisoryForecastSignal>,
@@ -1053,6 +1259,29 @@ fn lens_from_store_with_rule_facts(
         }
     }
 
+    let vector_hits = store
+        .search_vector_continuations_for_lens(&request.query)
+        .context("failed to search vector continuations")?;
+    let vector_influences: Vec<_> = vector_hits
+        .iter()
+        .map(|hit| TimeFieldVectorInfluence {
+            continuation_id: hit.continuation.id.clone(),
+            strength: vector_strength_from_distance(hit.distance),
+        })
+        .collect();
+    for hit in vector_hits {
+        if !continuations
+            .iter()
+            .any(|stored| stored.id == hit.continuation.id)
+        {
+            continuations.push(hit.continuation);
+        }
+    }
+
+    let continuation_ids: Vec<_> = continuations
+        .iter()
+        .map(|continuation| continuation.id.clone())
+        .collect();
     let mut commitment_constraints = store
         .active_commitments_for_continuations(&continuation_ids)
         .context("failed to load active commitment constraints")?;
@@ -1140,13 +1369,15 @@ fn lens_from_store_with_rule_facts(
         })
         .collect();
     let rule_facts = lens_rule_facts(request, &time_field_continuations);
-    let mut card = TimeFieldLensEngine.generate_with_relations_and_rule_facts(
-        request,
-        &time_field_continuations,
-        &relations,
-        &rule_facts,
-        raw_event_count,
-    );
+    let mut card = TimeFieldLensEngine
+        .generate_with_relations_and_rule_facts_and_vector_influences(
+            request,
+            &time_field_continuations,
+            &relations,
+            &rule_facts,
+            &vector_influences,
+            raw_event_count,
+        );
     card.commitment_constraints = commitment_constraints;
     card.advisory_forecast_signals = advisory_signals
         .iter()
@@ -1160,6 +1391,13 @@ fn is_lens_relevant_rule_fact(fact: &RuleFact) -> bool {
         fact.predicate.as_str(),
         "needs_review" | "risk_marker" | "timing_attention" | "path_choice"
     )
+}
+
+fn vector_strength_from_distance(distance: f64) -> f64 {
+    if !distance.is_finite() {
+        return 0.0;
+    }
+    1.0 / (1.0 + distance.max(0.0))
 }
 
 fn lens_relevant_rule_fact_predicates(rule_facts: &[RuleFact]) -> Vec<String> {

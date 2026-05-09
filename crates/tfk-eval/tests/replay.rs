@@ -7,7 +7,7 @@ use tfk_eval::{
     replay_fixture, replay_forecast_fixture, replay_lens_advisory_signal_fixture,
     replay_lens_linked_raw_event_fixture, replay_relation_boundary_fixture,
     replay_relation_ranking_fixture, replay_rules_lens_influence_fixture,
-    replay_semantic_lens_influence_fixture,
+    replay_semantic_lens_influence_fixture, replay_vector_lens_influence_fixture,
 };
 use tfk_model_client::{ForecastPredictionClient, StaticForecastClient};
 use tfk_protocol::{AdvisoryForecastSignal, EventSource, EvidenceStatus, ForecastRequest};
@@ -80,6 +80,11 @@ fn semantic_lens_backslash_literal_fixture_path() -> PathBuf {
 fn rules_lens_influence_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/temporalbench/rules_lens_influence/review_now.json")
+}
+
+fn vector_lens_influence_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/vector_lens_influence/basic.json")
 }
 
 fn commitment_forecast_fixture_path() -> PathBuf {
@@ -742,6 +747,60 @@ fn rules_lens_influence_cli_prints_structured_json_summary() {
             .len(),
         4
     );
+    assert_eq!(value["ok"], true);
+}
+
+#[test]
+fn vector_lens_influence_replay_promotes_fake_vector_hit_over_lexical_baseline() {
+    let summary =
+        replay_vector_lens_influence_fixture(&vector_lens_influence_fixture_path()).unwrap();
+
+    assert_eq!(summary.continuation_count, 2);
+    assert_eq!(summary.vector_hit_count, 1);
+    assert_eq!(summary.expected_top_title, "latent release safety boundary");
+    assert_eq!(summary.actual_top_title, "latent release safety boundary");
+    assert_eq!(summary.expected_top_source, "vector");
+    assert_eq!(summary.actual_top_source, "vector");
+    assert_eq!(
+        summary.actual_ordered_titles,
+        vec![
+            "latent release safety boundary".to_string(),
+            "lexical beacon baseline".to_string(),
+        ]
+    );
+    assert_eq!(summary.actual_vector_hit_labels, vec!["vector_target"]);
+    assert!(summary.ok);
+}
+
+#[test]
+fn vector_lens_influence_cli_prints_structured_json_summary() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tfk-eval"))
+        .args([
+            "vector-lens-influence",
+            "--fixture",
+            vector_lens_influence_fixture_path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["continuation_count"], 2);
+    assert_eq!(value["vector_hit_count"], 1);
+    assert_eq!(value["actual_top_title"], "latent release safety boundary");
+    assert_eq!(value["actual_top_source"], "vector");
+    assert_eq!(value["actual_vector_hit_labels"][0], "vector_target");
+    assert_eq!(value["actual_ordered_titles"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        value["actual_ordered_titles"][0],
+        "latent release safety boundary"
+    );
+    assert_eq!(value["actual_ordered_titles"][1], "lexical beacon baseline");
     assert_eq!(value["ok"], true);
 }
 
