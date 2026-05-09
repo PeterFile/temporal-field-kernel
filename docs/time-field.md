@@ -28,6 +28,7 @@ It is not an agent memory platform. It is the layer that turns history into infl
 - `tfk-core`: deterministic continuation, temporal lens, preflight, and scoring logic.
 - `tfk-store`: append-only raw archive plus SQLite projections for historical influence, continuations, idempotent continuation relations, and lens grounding.
 - `tfk-rules`: embedded Datalog-like fixed-point rules for deriving influence and consequence signals.
+- `tfk-vector`: optional vector index contract used by injected/runtime backends without making vectors a required dependency.
 - `tfk-api`: local daemon API surface for observing, querying lenses, checking preflight risk, and recording continuations and relation edges.
 - `tfk-daemon`: local kernel process that owns the archive, projections, API, and optional model client wiring.
 - `tfk-cli`: operator and adapter entrypoint for feeding observations and reading temporal lens output.
@@ -44,6 +45,7 @@ The current implementation is contract-level and local-first. It includes:
 - relation-aware temporal lens cards with raw event fallback
 - deterministic explicit relation-kind ranking for active continuations (`supports`, `depends_on`, `subsumes`) while `conflicts`/`blocks` surface as boundaries
 - deterministic semantic continuation candidate expansion for lens queries without requiring vector runtime
+- optional vector-backed continuation influence through injected/runtime vector backends, covered by a TemporalBench fake-index fixture without embedding or sqlite-vec requirements
 - rules-derived lens influence from explicit continuation markers through the embedded core rule set
 - structured commitment capture/list support and lens constraints
 - deterministic preflight and commitment-aware forecast scoring for path-choice confirmation
@@ -57,5 +59,5 @@ The kernel does not schedule work, own user workflows, provide a UI, or act as a
 
 ## Next Slices
 
-- Extend lens influence beyond deterministic explicit relation-kind and semantic candidate expansion into vector-backed influence when embedding/runtime wiring exists.
-- Expand the existing TemporalBench matrix with missing edge cases for vector influence and more action-loop assimilation boundaries.
+- Wire a real embedding/runtime vector backend behind `tfk-vector` with explicit capability probing, operator opt-in, and the existing Noop fallback; do not make sqlite-vec or embedding generation a default dependency.
+- Expand the existing TemporalBench matrix with additional vector influence edge cases and more action-loop assimilation boundaries.

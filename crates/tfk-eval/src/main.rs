@@ -6,7 +6,7 @@ use tfk_eval::{
     replay_forecast_fixture, replay_lens_advisory_signal_fixture,
     replay_lens_linked_raw_event_fixture, replay_relation_boundary_fixture,
     replay_relation_ranking_fixture, replay_rules_lens_influence_fixture,
-    replay_semantic_lens_influence_fixture,
+    replay_semantic_lens_influence_fixture, replay_vector_lens_influence_fixture,
 };
 
 #[derive(Debug, Parser)]
@@ -61,6 +61,10 @@ enum Command {
         #[arg(long)]
         fixture: PathBuf,
     },
+    VectorLensInfluence {
+        #[arg(long)]
+        fixture: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -104,6 +108,10 @@ fn main() -> anyhow::Result<()> {
         }
         Command::RulesLensInfluence { fixture } => {
             let summary = replay_rules_lens_influence_fixture(&fixture)?;
+            println!("{}", serde_json::to_string(&summary)?);
+        }
+        Command::VectorLensInfluence { fixture } => {
+            let summary = replay_vector_lens_influence_fixture(&fixture)?;
             println!("{}", serde_json::to_string(&summary)?);
         }
     }

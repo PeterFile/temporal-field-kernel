@@ -1,0 +1,46 @@
+{
+  "continuations": [
+    {
+      "label": "lexical_baseline",
+      "input": {
+        "title": "lexical beacon baseline",
+        "summary": "ordinary lexical beacon note that a plain query can find",
+        "continuation_type": "narrative",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "vector_target",
+      "input": {
+        "title": "latent release safety boundary",
+        "summary": "evidence boundary from the injected semantic backend should be verified before release",
+        "continuation_type": "risk",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    }
+  ],
+  "lens": {
+    "query": "lexical beacon",
+    "horizon": ["next-action"],
+    "perspective": ["safety"]
+  },
+  "fake_vector_hits": [
+    {
+      "label": "vector_target",
+      "distance": 0.0
+    }
+  ],
+  "expected": {
+    "top_title": "latent release safety boundary",
+    "top_source": "vector",
+    "ordered_titles": [
+      "latent release safety boundary",
+      "lexical beacon baseline"
+    ],
+    "vector_hit_labels": ["vector_target"]
+  }
+}
