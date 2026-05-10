@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
@@ -58,6 +58,8 @@ pub fn router_with_state(state: ApiState) -> Router {
     Router::new()
         .route("/healthz", get(health_handler))
         .route("/v1/observe", post(observe_handler))
+        .route("/v1/raw-events", get(search_raw_events_handler))
+        .route("/v1/raw-events/:id", get(get_raw_event_handler))
         .route(
             "/v1/continuations",
             post(create_continuation_handler).get(list_continuations_handler),
@@ -110,6 +112,62 @@ async fn observe_handler(
         "local-observe",
         "local-observe",
         stored,
+    )))
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct RawEventSearchParams {
+    query: Option<String>,
+}
+
+async fn search_raw_events_handler(
+    State(state): State<ApiState>,
+    Query(params): Query<RawEventSearchParams>,
+) -> Result<Json<ApiEnvelope<Vec<StoredRawEvent>>>, ApiError> {
+    let query = params.query.unwrap_or_default();
+    let events = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|_| internal_error("store lock poisoned"))?;
+        let ids = store
+            .search_raw_events(&query)
+            .map_err(|error| internal_error(error.to_string()))?;
+        let mut events = Vec::new();
+        for id in ids {
+            if let Some(event) = store
+                .get_raw_event(&id)
+                .map_err(|error| internal_error(error.to_string()))?
+            {
+                events.push(event);
+            }
+        }
+        events
+    };
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-raw-event-search",
+        "local-raw-event-search",
+        events,
+    )))
+}
+
+async fn get_raw_event_handler(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiEnvelope<StoredRawEvent>>, ApiError> {
+    let event = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .get_raw_event(&id)
+        .map_err(|error| internal_error(error.to_string()))?
+        .ok_or_else(|| not_found_error(format!("raw event not found: {id}")))?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-raw-event-get",
+        "local-raw-event-get",
+        event,
     )))
 }
 

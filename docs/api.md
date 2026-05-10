@@ -4,6 +4,8 @@ Canonical local endpoints:
 
 ```text
 POST /v1/observe
+GET  /v1/raw-events
+GET  /v1/raw-events/:id
 POST /v1/continuations
 GET  /v1/continuations
 GET  /v1/continuations/:id
@@ -52,6 +54,20 @@ Minimal body:
 ```
 
 Returns `ApiEnvelope<StoredRawEvent>`.
+
+### GET /v1/raw-events
+
+Returns `ApiEnvelope<Vec<StoredRawEvent>>` for raw events matching the `query` parameter. Empty or missing `query` returns an empty list rather than dumping all stored evidence.
+
+Example:
+
+```text
+GET /v1/raw-events?query=项目状态机
+```
+
+### GET /v1/raw-events/:id
+
+Returns `ApiEnvelope<StoredRawEvent>` for one observed raw event, or a 404 envelope when the id is missing.
 
 ### POST /v1/continuations
 
