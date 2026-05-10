@@ -305,16 +305,12 @@ fn extract_http_response_body(response: &[u8]) -> anyhow::Result<Vec<u8>> {
         find_header_end(response).context("daemon response did not contain headers")?;
     let headers = std::str::from_utf8(&response[..header_end])
         .context("daemon response headers were not valid UTF-8")?;
-    let status = headers
+    let _status = headers
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .context("daemon response did not contain an HTTP status")?;
-
-    if !(200..300).contains(&status) {
-        bail!("daemon returned HTTP status {status}");
-    }
 
     let body_start = header_end + 4;
     let body = &response[body_start..];

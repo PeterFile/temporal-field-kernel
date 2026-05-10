@@ -2,6 +2,8 @@ use serde_json::json;
 use tfk_mcp::{
     daemon_request_for, degraded_response, dispatch_to_daemon, parse_command_line, StdioCommand,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixListener;
 
 #[test]
 fn parses_health_json_line_command() {
@@ -302,6 +304,43 @@ async fn malformed_observe_request_returns_command_error_without_daemon() {
         .as_str()
         .unwrap()
         .contains("observe request did not match protocol schema"));
+}
+
+#[tokio::test]
+async fn daemon_http_error_envelope_is_forwarded_without_degradation() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("tfk-mcp-http-error-{unique}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket_path = dir.join("tfkd.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).await.unwrap();
+        let body = br#"{"ok":false,"error":"missing continuation"}"#;
+        let headers = format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+    });
+
+    let command = parse_command_line(r#"{"command":"continuation_get","id":"missing"}"#).unwrap();
+    let response = dispatch_to_daemon(&socket_path, &command).await;
+    server.await.unwrap();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&dir);
+
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["command"], "continuation_get");
+    assert_eq!(response["degraded"], false);
+    assert_eq!(response["data"]["ok"], false);
+    assert_eq!(response["data"]["error"], "missing continuation");
 }
 
 #[test]
