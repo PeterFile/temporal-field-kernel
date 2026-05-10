@@ -10,7 +10,8 @@ use anyhow::{anyhow, bail, Context};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use tfk_protocol::{
-    CommitRequest, ForecastRequest, LensRequest, PreflightSignals, TemporalDeltaInput,
+    CommitRequest, ContinuationInput, ContinuationRelationEdge, ForecastRequest, LensRequest,
+    PreflightSignals, RawEventInput, TemporalDeltaInput,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -19,6 +20,9 @@ use tokio::net::UnixStream;
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum StdioCommand {
     Health,
+    Observe {
+        request: Value,
+    },
     Lens {
         query: String,
     },
@@ -38,17 +42,36 @@ pub enum StdioCommand {
     Assimilate {
         request: Value,
     },
+    ContinuationCreate {
+        request: Value,
+    },
+    ContinuationList,
+    ContinuationGet {
+        id: String,
+    },
+    RelationCreate {
+        request: Value,
+    },
+    RelationList,
+    CommitmentList,
 }
 
 impl StdioCommand {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Health => "health",
+            Self::Observe { .. } => "observe",
             Self::Lens { .. } => "lens",
             Self::Preflight { .. } => "preflight",
             Self::Forecast { .. } => "forecast",
             Self::Commit { .. } => "commit",
             Self::Assimilate { .. } => "assimilate",
+            Self::ContinuationCreate { .. } => "continuation_create",
+            Self::ContinuationList => "continuation_list",
+            Self::ContinuationGet { .. } => "continuation_get",
+            Self::RelationCreate { .. } => "relation_create",
+            Self::RelationList => "relation_list",
+            Self::CommitmentList => "commitment_list",
         }
     }
 }
@@ -56,7 +79,7 @@ impl StdioCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonRequest {
     pub method: &'static str,
-    pub path: &'static str,
+    pub path: String,
     pub body: Vec<u8>,
 }
 
@@ -73,8 +96,13 @@ pub fn daemon_request_for(command: &StdioCommand) -> anyhow::Result<DaemonReques
     match command {
         StdioCommand::Health => Ok(DaemonRequest {
             method: "GET",
-            path: "/healthz",
+            path: "/healthz".to_string(),
             body: Vec::new(),
+        }),
+        StdioCommand::Observe { request } => Ok(DaemonRequest {
+            method: "POST",
+            path: "/v1/observe".to_string(),
+            body: typed_request_body::<RawEventInput>(request, "observe")?,
         }),
         StdioCommand::Lens { query } => {
             if query.trim().is_empty() {
@@ -88,7 +116,7 @@ pub fn daemon_request_for(command: &StdioCommand) -> anyhow::Result<DaemonReques
 
             Ok(DaemonRequest {
                 method: "POST",
-                path: "/v1/lens",
+                path: "/v1/lens".to_string(),
                 body: serde_json::to_vec(&request)?,
             })
         }
@@ -107,26 +135,75 @@ pub fn daemon_request_for(command: &StdioCommand) -> anyhow::Result<DaemonReques
 
             Ok(DaemonRequest {
                 method: "POST",
-                path: "/v1/preflight",
+                path: "/v1/preflight".to_string(),
                 body: serde_json::to_vec(&request)?,
             })
         }
         StdioCommand::Forecast { request } => Ok(DaemonRequest {
             method: "POST",
-            path: "/v1/forecast",
+            path: "/v1/forecast".to_string(),
             body: typed_request_body::<ForecastRequest>(request, "forecast")?,
         }),
         StdioCommand::Commit { request } => Ok(DaemonRequest {
             method: "POST",
-            path: "/v1/commit",
+            path: "/v1/commit".to_string(),
             body: typed_request_body::<CommitRequest>(request, "commit")?,
         }),
         StdioCommand::Assimilate { request } => Ok(DaemonRequest {
             method: "POST",
-            path: "/v1/assimilate",
+            path: "/v1/assimilate".to_string(),
             body: typed_request_body::<TemporalDeltaInput>(request, "assimilate")?,
         }),
+        StdioCommand::ContinuationCreate { request } => Ok(DaemonRequest {
+            method: "POST",
+            path: "/v1/continuations".to_string(),
+            body: typed_request_body::<ContinuationInput>(request, "continuation_create")?,
+        }),
+        StdioCommand::ContinuationList => Ok(DaemonRequest {
+            method: "GET",
+            path: "/v1/continuations".to_string(),
+            body: Vec::new(),
+        }),
+        StdioCommand::ContinuationGet { id } => {
+            let id = safe_path_id(id, "continuation id")?;
+
+            Ok(DaemonRequest {
+                method: "GET",
+                path: format!("/v1/continuations/{id}"),
+                body: Vec::new(),
+            })
+        }
+        StdioCommand::RelationCreate { request } => Ok(DaemonRequest {
+            method: "POST",
+            path: "/v1/continuation-relations".to_string(),
+            body: typed_request_body::<ContinuationRelationEdge>(request, "relation_create")?,
+        }),
+        StdioCommand::RelationList => Ok(DaemonRequest {
+            method: "GET",
+            path: "/v1/continuation-relations".to_string(),
+            body: Vec::new(),
+        }),
+        StdioCommand::CommitmentList => Ok(DaemonRequest {
+            method: "GET",
+            path: "/v1/commitments".to_string(),
+            body: Vec::new(),
+        }),
     }
+}
+
+fn safe_path_id<'a>(id: &'a str, label: &str) -> anyhow::Result<&'a str> {
+    if id.is_empty() {
+        bail!("{label} must not be empty");
+    }
+
+    if !id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        bail!("{label} must contain only ASCII letters, digits, '_' or '-'");
+    }
+
+    Ok(id)
 }
 
 fn typed_request_body<T>(request: &Value, command: &str) -> anyhow::Result<Vec<u8>>
@@ -145,7 +222,7 @@ pub async fn dispatch_to_daemon(socket_path: &Path, command: &StdioCommand) -> V
         Err(error) => return command_error_response(command_name, error),
     };
 
-    match request_json_over_uds(socket_path, request.method, request.path, &request.body).await {
+    match request_json_over_uds(socket_path, request.method, &request.path, &request.body).await {
         Ok(body) => match serde_json::from_slice::<Value>(&body) {
             Ok(data) => json!({
                 "ok": true,
