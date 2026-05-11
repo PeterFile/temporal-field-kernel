@@ -5,8 +5,8 @@ use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
 use tfk_protocol::{
     CommitRequest, ContinuationInput, ContinuationRelationEdge, ContinuationRelationKind,
-    ContinuationStatus, ContinuationType, EventSource, ForecastRequest, LensRequest,
-    PreflightSignals, RawEventInput, TemporalDeltaInput,
+    ContinuationStatus, ContinuationType, EventSource, EvidenceStatus, ForecastRequest,
+    LensRequest, PreflightSignals, RawEventInput, TemporalDeltaInput,
 };
 
 #[derive(Debug, Parser)]
@@ -29,6 +29,14 @@ enum Command {
         session: String,
         #[arg(long, default_value = "cli")]
         adapter: String,
+        #[arg(long, default_value = "user", value_parser = parse_event_source)]
+        source: EventSource,
+        #[arg(long, default_value = "observed", value_parser = parse_evidence_status)]
+        evidence_status: EvidenceStatus,
+        #[arg(long)]
+        act_type: Option<String>,
+        #[arg(long)]
+        time_utc: Option<String>,
         content: String,
     },
     /// Request a minimal lens card from the local tfkd daemon.
@@ -171,10 +179,21 @@ async fn main() -> anyhow::Result<()> {
         Command::Observe {
             session,
             adapter,
+            source,
+            evidence_status,
+            act_type,
+            time_utc,
             content,
         } => {
-            let event = RawEventInput::new_text(session, adapter, EventSource::User, content);
-            let body = serde_json::to_vec(&event)?;
+            let body = observe_request_body(
+                session,
+                adapter,
+                source,
+                content,
+                act_type,
+                evidence_status,
+                time_utc,
+            )?;
             let response =
                 tfk_cli::request_json_over_uds(&socket_path, "/v1/observe", &body).await?;
             print_json(&response)?;
@@ -368,6 +387,22 @@ fn preflight_request_body(
     })?)
 }
 
+fn observe_request_body(
+    session: String,
+    adapter: String,
+    source: EventSource,
+    content: String,
+    act_type: Option<String>,
+    evidence_status: EvidenceStatus,
+    time_utc: Option<String>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut event = RawEventInput::new_text(session, adapter, source, content);
+    event.act_type = act_type;
+    event.evidence_status = evidence_status;
+    event.time_utc = time_utc;
+    Ok(serde_json::to_vec(&event)?)
+}
+
 fn commit_request_body(
     speaker: String,
     statement: String,
@@ -406,6 +441,30 @@ fn parse_relation_kind(value: &str) -> Result<ContinuationRelationKind, String> 
         "depends_on" => Ok(ContinuationRelationKind::DependsOn),
         "subsumes" => Ok(ContinuationRelationKind::Subsumes),
         _ => Err("expected one of: blocks, conflicts, supports, depends_on, subsumes".to_string()),
+    }
+}
+
+fn parse_event_source(value: &str) -> Result<EventSource, String> {
+    match value {
+        "user" => Ok(EventSource::User),
+        "agent" => Ok(EventSource::Agent),
+        "tool" => Ok(EventSource::Tool),
+        "world" => Ok(EventSource::World),
+        "system" => Ok(EventSource::System),
+        _ => Err("expected one of: user, agent, tool, world, system".to_string()),
+    }
+}
+
+fn parse_evidence_status(value: &str) -> Result<EvidenceStatus, String> {
+    match value {
+        "observed" => Ok(EvidenceStatus::Observed),
+        "user_asserted" => Ok(EvidenceStatus::UserAsserted),
+        "inferred" => Ok(EvidenceStatus::Inferred),
+        "predicted" => Ok(EvidenceStatus::Predicted),
+        "normative" => Ok(EvidenceStatus::Normative),
+        _ => Err(
+            "expected one of: observed, user_asserted, inferred, predicted, normative".to_string(),
+        ),
     }
 }
 
@@ -450,6 +509,150 @@ fn assimilate_endpoint() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_observe_defaults() {
+        let cli = Cli::parse_from(["tfk", "observe", "hello temporal field"]);
+
+        match cli.command {
+            Command::Observe {
+                session,
+                adapter,
+                source,
+                evidence_status,
+                act_type,
+                time_utc,
+                content,
+            } => {
+                assert_eq!(session, "manual");
+                assert_eq!(adapter, "cli");
+                assert_eq!(source, EventSource::User);
+                assert_eq!(evidence_status, EvidenceStatus::Observed);
+                assert_eq!(act_type, None);
+                assert_eq!(time_utc, None);
+                assert_eq!(content, "hello temporal field");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn observe_default_body_serializes_user_observed() {
+        let body = observe_request_body(
+            "manual".to_string(),
+            "cli".to_string(),
+            EventSource::User,
+            "hello temporal field".to_string(),
+            None,
+            EvidenceStatus::Observed,
+            None,
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["session_id"], "manual");
+        assert_eq!(json["adapter_id"], "cli");
+        assert_eq!(json["source"], "user");
+        assert_eq!(json["evidence_status"], "observed");
+        assert_eq!(json["content"], "hello temporal field");
+        assert!(json["act_type"].is_null());
+        assert!(json["time_utc"].is_null());
+    }
+
+    #[test]
+    fn parses_observe_agent_flags() {
+        let cli = Cli::parse_from([
+            "tfk",
+            "observe",
+            "--session",
+            "session-agent",
+            "--adapter",
+            "agent-cli",
+            "--source",
+            "agent",
+            "--evidence-status",
+            "inferred",
+            "--act-type",
+            "tool_call",
+            "--time-utc",
+            "2026-05-10T00:00:00Z",
+            "agent inferred a state change",
+        ]);
+
+        match cli.command {
+            Command::Observe {
+                session,
+                adapter,
+                source,
+                evidence_status,
+                act_type,
+                time_utc,
+                content,
+            } => {
+                assert_eq!(session, "session-agent");
+                assert_eq!(adapter, "agent-cli");
+                assert_eq!(source, EventSource::Agent);
+                assert_eq!(evidence_status, EvidenceStatus::Inferred);
+                assert_eq!(act_type.as_deref(), Some("tool_call"));
+                assert_eq!(time_utc.as_deref(), Some("2026-05-10T00:00:00Z"));
+                assert_eq!(content, "agent inferred a state change");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn observe_agent_body_serializes_source_evidence_act_type_and_time() {
+        let body = observe_request_body(
+            "session-agent".to_string(),
+            "agent-cli".to_string(),
+            EventSource::Agent,
+            "agent inferred a state change".to_string(),
+            Some("tool_call".to_string()),
+            EvidenceStatus::Inferred,
+            Some("2026-05-10T00:00:00Z".to_string()),
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["session_id"], "session-agent");
+        assert_eq!(json["adapter_id"], "agent-cli");
+        assert_eq!(json["source"], "agent");
+        assert_eq!(json["evidence_status"], "inferred");
+        assert_eq!(json["act_type"], "tool_call");
+        assert_eq!(json["time_utc"], "2026-05-10T00:00:00Z");
+        assert_eq!(json["content"], "agent inferred a state change");
+    }
+
+    #[test]
+    fn observe_parsers_accept_supported_source_and_evidence_values() {
+        assert_eq!(parse_event_source("user").unwrap(), EventSource::User);
+        assert_eq!(parse_event_source("agent").unwrap(), EventSource::Agent);
+        assert_eq!(parse_event_source("tool").unwrap(), EventSource::Tool);
+        assert_eq!(parse_event_source("world").unwrap(), EventSource::World);
+        assert_eq!(parse_event_source("system").unwrap(), EventSource::System);
+
+        assert_eq!(
+            parse_evidence_status("observed").unwrap(),
+            EvidenceStatus::Observed
+        );
+        assert_eq!(
+            parse_evidence_status("user_asserted").unwrap(),
+            EvidenceStatus::UserAsserted
+        );
+        assert_eq!(
+            parse_evidence_status("inferred").unwrap(),
+            EvidenceStatus::Inferred
+        );
+        assert_eq!(
+            parse_evidence_status("predicted").unwrap(),
+            EvidenceStatus::Predicted
+        );
+        assert_eq!(
+            parse_evidence_status("normative").unwrap(),
+            EvidenceStatus::Normative
+        );
+    }
 
     #[test]
     fn parses_continuation_create_command() {
