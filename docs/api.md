@@ -67,9 +67,23 @@ Example:
 GET /v1/raw-events?query=项目状态机
 ```
 
+CLI and MCP wrapper examples:
+
+```text
+tfk raw-event search "项目状态机"
+{"command":"raw_event_search","query":"项目状态机"}
+```
+
 ### GET /v1/raw-events/:id
 
 Returns `ApiEnvelope<StoredRawEvent>` for one observed raw event, or a 404 envelope when the id is missing.
+
+CLI and MCP wrapper examples:
+
+```text
+tfk raw-event get evt_...
+{"command":"raw_event_get","id":"evt_..."}
+```
 
 ### POST /v1/continuations
 

@@ -23,6 +23,12 @@ pub enum StdioCommand {
     Observe {
         request: Value,
     },
+    RawEventSearch {
+        query: String,
+    },
+    RawEventGet {
+        id: String,
+    },
     Lens {
         query: String,
     },
@@ -61,6 +67,8 @@ impl StdioCommand {
         match self {
             Self::Health => "health",
             Self::Observe { .. } => "observe",
+            Self::RawEventSearch { .. } => "raw_event_search",
+            Self::RawEventGet { .. } => "raw_event_get",
             Self::Lens { .. } => "lens",
             Self::Preflight { .. } => "preflight",
             Self::Forecast { .. } => "forecast",
@@ -104,6 +112,20 @@ pub fn daemon_request_for(command: &StdioCommand) -> anyhow::Result<DaemonReques
             path: "/v1/observe".to_string(),
             body: typed_request_body::<RawEventInput>(request, "observe")?,
         }),
+        StdioCommand::RawEventSearch { query } => Ok(DaemonRequest {
+            method: "GET",
+            path: raw_event_search_path(query),
+            body: Vec::new(),
+        }),
+        StdioCommand::RawEventGet { id } => {
+            let id = safe_path_id(id, "raw event id")?;
+
+            Ok(DaemonRequest {
+                method: "GET",
+                path: format!("/v1/raw-events/{id}"),
+                body: Vec::new(),
+            })
+        }
         StdioCommand::Lens { query } => {
             if query.trim().is_empty() {
                 bail!("lens query must not be empty");
@@ -204,6 +226,30 @@ fn safe_path_id<'a>(id: &'a str, label: &str) -> anyhow::Result<&'a str> {
     }
 
     Ok(id)
+}
+
+fn raw_event_search_path(query: &str) -> String {
+    format!("/v1/raw-events?query={}", percent_encode_query(query))
+}
+
+fn percent_encode_query(query: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::new();
+    for byte in query.bytes() {
+        if is_unreserved_query_byte(byte) {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0F) as usize] as char);
+        }
+    }
+    encoded
+}
+
+fn is_unreserved_query_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
 }
 
 fn typed_request_body<T>(request: &Value, command: &str) -> anyhow::Result<Vec<u8>>

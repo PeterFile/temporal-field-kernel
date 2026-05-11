@@ -153,6 +153,50 @@ fn observe_command_maps_to_daemon_observe_request() {
 }
 
 #[test]
+fn raw_event_search_command_maps_to_daemon_raw_events_get() {
+    let command =
+        parse_command_line(r#"{"command":"raw_event_search","query":"café & risk/now%"}"#).unwrap();
+    let request = daemon_request_for(&command).unwrap();
+
+    assert_eq!(request.method, "GET");
+    assert_eq!(
+        request.path,
+        "/v1/raw-events?query=caf%C3%A9%20%26%20risk%2Fnow%25"
+    );
+    assert!(request.body.is_empty());
+}
+
+#[test]
+fn raw_event_get_command_maps_to_daemon_raw_event_get() {
+    let command = parse_command_line(r#"{"command":"raw_event_get","id":"evt_ABC-123"}"#).unwrap();
+    let request = daemon_request_for(&command).unwrap();
+
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/v1/raw-events/evt_ABC-123");
+    assert!(request.body.is_empty());
+}
+
+#[test]
+fn raw_event_get_rejects_unsafe_path_ids() {
+    for bad_id in ["", "evt/a", "evt\rheader", "evt\nheader", "evt?query"] {
+        let command = parse_command_line(
+            &json!({
+                "command": "raw_event_get",
+                "id": bad_id,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let error = daemon_request_for(&command).unwrap_err().to_string();
+
+        assert!(
+            error.contains("raw event id"),
+            "unexpected error for {bad_id:?}: {error}"
+        );
+    }
+}
+
+#[test]
 fn continuation_create_command_maps_to_daemon_continuations_post() {
     let command = parse_command_line(
         &json!({

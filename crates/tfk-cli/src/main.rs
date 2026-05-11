@@ -39,6 +39,11 @@ enum Command {
         time_utc: Option<String>,
         content: String,
     },
+    /// Search or get raw events through the local tfkd daemon.
+    RawEvent {
+        #[command(subcommand)]
+        command: RawEventCommand,
+    },
     /// Request a minimal lens card from the local tfkd daemon.
     Lens { query: String },
     /// Check deterministic path-choice risk through the local tfkd daemon.
@@ -87,6 +92,14 @@ enum Command {
         #[arg(long)]
         json_file: PathBuf,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum RawEventCommand {
+    /// Search observed raw events by content query.
+    Search { query: String },
+    /// Get one observed raw event.
+    Get { id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -198,6 +211,18 @@ async fn main() -> anyhow::Result<()> {
                 tfk_cli::request_json_over_uds(&socket_path, "/v1/observe", &body).await?;
             print_json(&response)?;
         }
+        Command::RawEvent { command } => match command {
+            RawEventCommand::Search { query } => {
+                let path = raw_event_search_path(&query);
+                let response = tfk_cli::request_over_uds(&socket_path, "GET", &path, b"").await?;
+                print_json(&response)?;
+            }
+            RawEventCommand::Get { id } => {
+                let path = raw_event_get_path(&id)?;
+                let response = tfk_cli::request_over_uds(&socket_path, "GET", &path, b"").await?;
+                print_json(&response)?;
+            }
+        },
         Command::Lens { query } => {
             let request = LensRequest {
                 query,
@@ -347,6 +372,18 @@ fn default_socket_path() -> PathBuf {
         .join("tfkd.sock")
 }
 
+fn raw_event_search_path(query: &str) -> String {
+    format!(
+        "{}?query={}",
+        raw_events_endpoint(),
+        percent_encode_query(query)
+    )
+}
+
+fn raw_event_get_path(id: &str) -> anyhow::Result<String> {
+    resource_get_path(raw_events_endpoint(), id, "raw event id")
+}
+
 fn continuation_get_path(id: &str) -> anyhow::Result<String> {
     resource_get_path("/v1/continuations", id, "continuation id")
 }
@@ -371,6 +408,26 @@ fn is_safe_path_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn percent_encode_query(query: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::new();
+    for byte in query.bytes() {
+        if is_unreserved_query_byte(byte) {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0F) as usize] as char);
+        }
+    }
+    encoded
+}
+
+fn is_unreserved_query_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
 }
 
 fn preflight_request_body(
@@ -488,6 +545,10 @@ where
 
 fn commit_create_endpoint() -> &'static str {
     "/v1/commit"
+}
+
+fn raw_events_endpoint() -> &'static str {
+    "/v1/raw-events"
 }
 
 fn relation_endpoint() -> &'static str {
@@ -651,6 +712,73 @@ mod tests {
         assert_eq!(
             parse_evidence_status("normative").unwrap(),
             EvidenceStatus::Normative
+        );
+    }
+
+    #[test]
+    fn parses_raw_event_search_command() {
+        let cli = Cli::parse_from(["tfk", "raw-event", "search", "project state"]);
+
+        match cli.command {
+            Command::RawEvent {
+                command: RawEventCommand::Search { query },
+            } => assert_eq!(query, "project state"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_event_search_path_percent_encodes_query() {
+        let path = raw_event_search_path("café & risk/now%");
+
+        assert_eq!(path, "/v1/raw-events?query=caf%C3%A9%20%26%20risk%2Fnow%25");
+    }
+
+    #[test]
+    fn parses_raw_event_get_command() {
+        let cli = Cli::parse_from(["tfk", "raw-event", "get", "evt_ABC-123"]);
+
+        match cli.command {
+            Command::RawEvent {
+                command: RawEventCommand::Get { id },
+            } => assert_eq!(id, "evt_ABC-123"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_event_get_path_allows_safe_ascii_id() {
+        let path = raw_event_get_path("evt_ABC-123").unwrap();
+
+        assert_eq!(path, "/v1/raw-events/evt_ABC-123");
+    }
+
+    #[test]
+    fn raw_event_get_path_rejects_request_line_and_path_injection() {
+        for id in [
+            "",
+            "evt\r\nX-Bad: true",
+            "evt\nX-Bad: true",
+            "evt/../other",
+            "evt%2Fother",
+            "evt?query=other",
+        ] {
+            let error = raw_event_get_path(id).unwrap_err();
+
+            assert!(
+                error.to_string().contains("invalid raw event id"),
+                "unexpected error for {id:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_event_endpoint_paths_are_stable() {
+        assert_eq!(raw_events_endpoint(), "/v1/raw-events");
+        assert_eq!(raw_event_search_path("risk"), "/v1/raw-events?query=risk");
+        assert_eq!(
+            raw_event_get_path("evt_123").unwrap(),
+            "/v1/raw-events/evt_123"
         );
     }
 
