@@ -28,6 +28,8 @@ cargo run -q -p tfk-daemon -- serve --uds /tmp/tfk.sock --data-dir /tmp/tfk-data
 cargo run -q -p tfk-daemon -- serve --uds /tmp/tfk.sock --data-dir /tmp/tfk-data --forecast-advisory-json fixtures/temporalbench/forecast_advisory/basic_forecast.json
 cargo run -q -p tfk-daemon -- serve --uds /tmp/tfk.sock --data-dir /tmp/tfk-data --forecast-sidecar-command python3 --forecast-sidecar-arg python/tfk_predictor/tfk_predictor/server.py
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock observe --session s1 --adapter cli "不要做项目状态机"
+cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock raw-event search "项目状态机"
+cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock raw-event get evt_...
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock continuation create --summary "继续跟踪这个判断" "项目状态机不是目标"
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock continuation list
 cargo run -q -p tfk-cli -- --uds /tmp/tfk.sock continuation get cont_...

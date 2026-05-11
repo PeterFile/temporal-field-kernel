@@ -19,6 +19,8 @@ POST /v1/preflight
 POST /v1/commit
 GET  /v1/commitments
 POST /v1/assimilate
+GET  /v1/temporal-deltas
+GET  /v1/temporal-deltas/:id
 GET  /healthz
 ```
 
@@ -65,9 +67,23 @@ Example:
 GET /v1/raw-events?query=项目状态机
 ```
 
+CLI and MCP wrapper examples:
+
+```text
+tfk raw-event search "项目状态机"
+{"command":"raw_event_search","query":"项目状态机"}
+```
+
 ### GET /v1/raw-events/:id
 
 Returns `ApiEnvelope<StoredRawEvent>` for one observed raw event, or a 404 envelope when the id is missing.
+
+CLI and MCP wrapper examples:
+
+```text
+tfk raw-event get evt_...
+{"command":"raw_event_get","id":"evt_..."}
+```
 
 ### POST /v1/continuations
 
@@ -197,3 +213,11 @@ Lifecycle coupling:
 - `Retire` retires the target continuation and linked active commitments only when all active linked commitments are revocable.
 - Retiring a non-revocable active commitment fails closed with HTTP 400, stores no temporal delta, and leaves the continuation and commitment statuses unchanged.
 - Closed and retired commitments are omitted from `GET /v1/commitments` and are not used by `/v1/lens` or `/v1/forecast` active constraints.
+
+### GET /v1/temporal-deltas
+
+Returns `ApiEnvelope<Vec<StoredTemporalDelta>>` for persisted temporal delta evidence, ordered by creation time and id. Each item exposes the stored delta id, originating `action_id`, serialized `changes_json`, `claims_json`, `evidence_json`, and creation timestamp. There is no pagination or filtering in this slice.
+
+### GET /v1/temporal-deltas/:id
+
+Returns `ApiEnvelope<StoredTemporalDelta>` for one persisted temporal delta, or a 404 envelope when the id is missing.

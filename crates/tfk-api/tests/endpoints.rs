@@ -15,7 +15,7 @@ use tfk_protocol::{
     LensCard, LensRequest, PreflightResult, PreflightSignals, RawEventInput, StoredCommitment,
     StoredContinuation, TemporalDeltaInput,
 };
-use tfk_store::{Store, StoredAdvisoryForecastSignal, StoredRawEvent};
+use tfk_store::{Store, StoredAdvisoryForecastSignal, StoredRawEvent, StoredTemporalDelta};
 use tfk_vector::{
     VectorDocument, VectorDocumentKind, VectorHit, VectorIndex, VectorIndexOutcome,
     VectorIndexStatus,
@@ -2137,6 +2137,66 @@ async fn assimilate_endpoint_persists_delta_and_updates_continuation_status() {
 }
 
 #[tokio::test]
+async fn temporal_delta_list_endpoint_returns_persisted_delta() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let stored_delta = create_temporal_delta_via_api(&app, "list temporal delta").await;
+
+    let response = app
+        .oneshot(empty_request("GET", "/v1/temporal-deltas"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<Vec<StoredTemporalDelta>> = read_json(response).await;
+    assert!(envelope.ok);
+    assert_eq!(envelope.data.unwrap(), vec![stored_delta]);
+}
+
+#[tokio::test]
+async fn temporal_delta_get_endpoint_returns_persisted_delta() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let stored_delta = create_temporal_delta_via_api(&app, "get temporal delta").await;
+
+    let response = app
+        .oneshot(empty_request(
+            "GET",
+            &format!("/v1/temporal-deltas/{}", stored_delta.id),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<StoredTemporalDelta> = read_json(response).await;
+    assert!(envelope.ok);
+    assert_eq!(envelope.data.unwrap(), stored_delta);
+}
+
+#[tokio::test]
+async fn temporal_delta_get_missing_returns_404_envelope() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+
+    let response = app
+        .oneshot(empty_request("GET", "/v1/temporal-deltas/missing-delta"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let envelope: ApiEnvelope<serde_json::Value> = read_json(response).await;
+    assert!(!envelope.ok);
+    assert!(envelope.data.is_none());
+    assert!(envelope.provenance.is_empty());
+    assert!(envelope.warnings.iter().any(|warning| {
+        warning.contains("temporal delta not found") && warning.contains("missing-delta")
+    }));
+}
+
+#[tokio::test]
 async fn assimilate_endpoint_rejects_missing_status_target() {
     let tmp = tempdir().unwrap();
     let store = open_test_store(tmp.path());
@@ -2207,6 +2267,29 @@ async fn get_commitment_for_continuation(
         .into_iter()
         .find(|commitment| commitment.continuation_id == continuation_id)
         .expect("created commitment should be listed")
+}
+
+async fn create_temporal_delta_via_api(app: &axum::Router, title: &str) -> StoredTemporalDelta {
+    let continuation = create_continuation_via_api(app, title).await;
+    let delta = TemporalDeltaInput {
+        action_id: format!("{title} action"),
+        changes: vec![ContinuationStatusDelta {
+            continuation_id: continuation.id,
+            delta: ContinuationDelta::Close,
+        }],
+        claims_made: Vec::new(),
+        evidence: Vec::new(),
+    };
+
+    let response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/assimilate", &delta))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<StoredTemporalDelta> = read_json(response).await;
+    assert!(envelope.ok);
+    envelope.data.unwrap()
 }
 
 async fn create_continuation_via_api(app: &axum::Router, title: &str) -> StoredContinuation {

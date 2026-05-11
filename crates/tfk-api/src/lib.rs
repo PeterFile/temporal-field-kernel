@@ -83,6 +83,8 @@ pub fn router_with_state(state: ApiState) -> Router {
         .route("/v1/commit", post(commit_handler))
         .route("/v1/commitments", get(list_commitments_handler))
         .route("/v1/assimilate", post(assimilate_handler))
+        .route("/v1/temporal-deltas", get(list_temporal_deltas_handler))
+        .route("/v1/temporal-deltas/:id", get(get_temporal_delta_handler))
         .with_state(state)
 }
 
@@ -471,6 +473,42 @@ async fn assimilate_handler(
     Ok(Json(ApiEnvelope::ok(
         "local-assimilate",
         "local-assimilate",
+        delta,
+    )))
+}
+
+async fn list_temporal_deltas_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<ApiEnvelope<Vec<StoredTemporalDelta>>>, ApiError> {
+    let deltas = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .list_temporal_deltas()
+        .map_err(|error| internal_error(error.to_string()))?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-temporal-delta-list",
+        "local-temporal-delta-list",
+        deltas,
+    )))
+}
+
+async fn get_temporal_delta_handler(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiEnvelope<StoredTemporalDelta>>, ApiError> {
+    let delta = state
+        .store
+        .lock()
+        .map_err(|_| internal_error("store lock poisoned"))?
+        .get_temporal_delta(&id)
+        .map_err(|error| internal_error(error.to_string()))?
+        .ok_or_else(|| not_found_error(format!("temporal delta not found: {id}")))?;
+
+    Ok(Json(ApiEnvelope::ok(
+        "local-temporal-delta-get",
+        "local-temporal-delta-get",
         delta,
     )))
 }
