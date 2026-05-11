@@ -65,6 +65,132 @@ async fn observe_endpoint_persists_raw_event_and_lens_can_recall_it() {
 }
 
 #[tokio::test]
+async fn raw_event_get_returns_observed_event() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+
+    let input = RawEventInput::new_text("s1", "cli", EventSource::User, "raw get observed event");
+    let observe_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/observe", &input))
+        .await
+        .unwrap();
+    assert_eq!(observe_response.status(), StatusCode::OK);
+    let observe_envelope: ApiEnvelope<StoredRawEvent> = read_json(observe_response).await;
+    assert!(observe_envelope.ok);
+    let stored = observe_envelope.data.unwrap();
+
+    let get_response = app
+        .oneshot(empty_request(
+            "GET",
+            &format!("/v1/raw-events/{}", stored.id),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_envelope: ApiEnvelope<StoredRawEvent> = read_json(get_response).await;
+    assert!(get_envelope.ok);
+    assert_eq!(get_envelope.data.unwrap(), stored);
+}
+
+#[tokio::test]
+async fn raw_event_get_missing_returns_404_envelope() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+
+    let response = app
+        .oneshot(empty_request("GET", "/v1/raw-events/missing-event"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let envelope: ApiEnvelope<serde_json::Value> = read_json(response).await;
+    assert!(!envelope.ok);
+    assert!(envelope.data.is_none());
+    assert!(envelope.provenance.is_empty());
+    assert!(envelope
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("raw event not found")));
+}
+
+#[tokio::test]
+async fn raw_event_search_returns_matching_events() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+
+    let matching_input =
+        RawEventInput::new_text("s1", "cli", EventSource::User, "needle raw event evidence");
+    let matching_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/observe", &matching_input))
+        .await
+        .unwrap();
+    assert_eq!(matching_response.status(), StatusCode::OK);
+    let matching_envelope: ApiEnvelope<StoredRawEvent> = read_json(matching_response).await;
+    let matching = matching_envelope.data.unwrap();
+
+    let unrelated_input = RawEventInput::new_text(
+        "s1",
+        "cli",
+        EventSource::User,
+        "unrelated raw event evidence",
+    );
+    let unrelated_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/observe", &unrelated_input))
+        .await
+        .unwrap();
+    assert_eq!(unrelated_response.status(), StatusCode::OK);
+
+    let search_response = app
+        .oneshot(empty_request("GET", "/v1/raw-events?query=needle"))
+        .await
+        .unwrap();
+
+    assert_eq!(search_response.status(), StatusCode::OK);
+    let search_envelope: ApiEnvelope<Vec<StoredRawEvent>> = read_json(search_response).await;
+    assert!(search_envelope.ok);
+    assert_eq!(search_envelope.data.unwrap(), vec![matching]);
+}
+
+#[tokio::test]
+async fn raw_event_search_empty_query_returns_empty_vec() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+
+    let input = RawEventInput::new_text(
+        "s1",
+        "cli",
+        EventSource::User,
+        "empty query must not dump this raw event",
+    );
+    let observe_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/observe", &input))
+        .await
+        .unwrap();
+    assert_eq!(observe_response.status(), StatusCode::OK);
+
+    for uri in ["/v1/raw-events?query=", "/v1/raw-events"] {
+        let response = app
+            .clone()
+            .oneshot(empty_request("GET", uri))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let envelope: ApiEnvelope<Vec<StoredRawEvent>> = read_json(response).await;
+        assert!(envelope.ok);
+        assert!(envelope.data.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn lens_endpoint_uses_semantic_candidate_expansion_for_distributed_tokens() {
     let tmp = tempdir().unwrap();
     let store = open_test_store(tmp.path());
