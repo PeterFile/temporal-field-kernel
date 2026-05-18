@@ -1066,6 +1066,7 @@ dependencies = [
  "clap",
  "hyper",
  "hyper-util",
+ "serde_json",
  "tempfile",
  "tfk-api",
  "tfk-model-client",
