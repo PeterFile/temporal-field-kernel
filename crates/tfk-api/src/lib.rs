@@ -534,7 +534,7 @@ async fn lens_handler(
             .search_advisory_forecast_signals(&request.query)
             .map_err(|error| internal_error(error.to_string()))?;
         let continuation_hits = store
-            .search_continuations(&request.query)
+            .search_living_continuations_for_lens(&request.query)
             .map_err(|error| internal_error(error.to_string()))?;
         let mut continuations = Vec::new();
         for id in continuation_hits {

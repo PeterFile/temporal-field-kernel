@@ -422,6 +422,22 @@ impl Store {
     }
 
     pub fn search_continuations(&self, query: &str) -> Result<Vec<String>> {
+        Ok(limited_continuation_hit_ids(
+            self.search_continuation_hits(query, false)?,
+        ))
+    }
+
+    pub fn search_living_continuations_for_lens(&self, query: &str) -> Result<Vec<String>> {
+        Ok(limited_continuation_hit_ids(
+            self.search_continuation_hits(query, true)?,
+        ))
+    }
+
+    fn search_continuation_hits(
+        &self,
+        query: &str,
+        living_only: bool,
+    ) -> Result<Vec<ContinuationSearchHit>> {
         let query = query.trim();
         if query.is_empty() {
             return Ok(Vec::new());
@@ -429,7 +445,12 @@ impl Store {
 
         let mut candidates = HashMap::new();
         let mut next_ordinal = 0usize;
-        self.collect_literal_continuation_candidates(query, &mut candidates, &mut next_ordinal)?;
+        self.collect_literal_continuation_candidates(
+            query,
+            living_only,
+            &mut candidates,
+            &mut next_ordinal,
+        )?;
 
         if allows_semantic_query_expansion(query) {
             let semantic_query = bounded_semantic_query(query);
@@ -444,6 +465,7 @@ impl Store {
                         token,
                         &tokens,
                         required_token_hits,
+                        living_only,
                         &mut candidates,
                         &mut next_ordinal,
                     )?;
@@ -460,8 +482,7 @@ impl Store {
                 .then_with(|| left.ordinal.cmp(&right.ordinal))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        hits.truncate(CONTINUATION_SEARCH_RESULT_LIMIT);
-        Ok(hits.into_iter().map(|hit| hit.id).collect())
+        Ok(hits)
     }
 
     pub fn search_vector_continuations_for_lens(
@@ -519,17 +540,26 @@ impl Store {
     fn collect_literal_continuation_candidates(
         &self,
         query: &str,
+        living_only: bool,
         candidates: &mut HashMap<String, ContinuationSearchHit>,
         next_ordinal: &mut usize,
     ) -> Result<()> {
         let pattern = like_literal_pattern(query);
-        let mut stmt = self.conn.prepare(
+        let sql = if living_only {
+            "SELECT id FROM continuations
+             WHERE status IN ('active', 'deferred')
+               AND (title LIKE ?1 ESCAPE '\\'
+                    OR summary LIKE ?1 ESCAPE '\\')
+             ORDER BY updated_at, id
+             LIMIT ?2"
+        } else {
             "SELECT id FROM continuations
              WHERE title LIKE ?1 ESCAPE '\\'
                 OR summary LIKE ?1 ESCAPE '\\'
              ORDER BY updated_at, id
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(
             params![pattern, CONTINUATION_SEARCH_RESULT_LIMIT as i64],
             |row| row.get::<_, String>(0),
@@ -555,18 +585,28 @@ impl Store {
         token: &str,
         query_tokens: &[String],
         required_token_hits: usize,
+        living_only: bool,
         candidates: &mut HashMap<String, ContinuationSearchHit>,
         next_ordinal: &mut usize,
     ) -> Result<()> {
         let fts_query = fts_literal_query(token);
-        let mut stmt = self.conn.prepare(
+        let sql = if living_only {
+            "SELECT continuations.id, continuations.title, continuations.summary
+             FROM continuation_search_fts
+             JOIN continuations ON continuations.rowid = continuation_search_fts.rowid
+             WHERE continuation_search_fts MATCH ?1
+               AND continuations.status IN ('active', 'deferred')
+             ORDER BY continuations.updated_at, continuations.id
+             LIMIT ?2"
+        } else {
             "SELECT continuations.id, continuations.title, continuations.summary
              FROM continuation_search_fts
              JOIN continuations ON continuations.rowid = continuation_search_fts.rowid
              WHERE continuation_search_fts MATCH ?1
              ORDER BY continuations.updated_at, continuations.id
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(
             params![fts_query, CONTINUATION_SEARCH_TOKEN_CANDIDATE_LIMIT as i64],
             |row| {
@@ -1070,6 +1110,11 @@ struct ContinuationSearchHit {
     phrase_match: bool,
     token_hits: usize,
     ordinal: usize,
+}
+
+fn limited_continuation_hit_ids(mut hits: Vec<ContinuationSearchHit>) -> Vec<String> {
+    hits.truncate(CONTINUATION_SEARCH_RESULT_LIMIT);
+    hits.into_iter().map(|hit| hit.id).collect()
 }
 
 struct ContinuationFields {

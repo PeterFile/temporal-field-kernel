@@ -563,6 +563,169 @@ async fn lens_endpoint_ignores_stale_vector_hits_to_closed_and_retired_continuat
 }
 
 #[tokio::test]
+async fn lens_endpoint_ignores_stale_lexical_hits_and_falls_back_to_raw_event() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let query = "living past lexical needle";
+    let raw_input = RawEventInput::new_text("s1", "cli", EventSource::User, query);
+    let raw_response = app
+        .clone()
+        .oneshot(json_request("POST", "/v1/observe", &raw_input))
+        .await
+        .unwrap();
+    assert_eq!(raw_response.status(), StatusCode::OK);
+    let raw_envelope: ApiEnvelope<StoredRawEvent> = read_json(raw_response).await;
+    assert!(raw_envelope.ok);
+    let raw_event = raw_envelope.data.unwrap();
+    let stale = [
+        create_continuation_with_status_via_api(
+            &app,
+            query,
+            "closed stale lexical hit",
+            ContinuationType::Obligation,
+            ContinuationStatus::Closed,
+        )
+        .await,
+        create_continuation_with_status_via_api(
+            &app,
+            query,
+            "retired stale lexical hit",
+            ContinuationType::Risk,
+            ContinuationStatus::Retired,
+        )
+        .await,
+        create_continuation_with_status_via_api(
+            &app,
+            query,
+            "stabilized stale lexical hit",
+            ContinuationType::Opportunity,
+            ContinuationStatus::Stabilized,
+        )
+        .await,
+    ];
+
+    let response = app
+        .oneshot(json_request(
+            "POST",
+            "/v1/lens",
+            &LensRequest {
+                query: query.to_string(),
+                horizon: Vec::new(),
+                perspective: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<LensCard> = read_json(response).await;
+    assert!(envelope.ok);
+    assert!(envelope
+        .provenance
+        .iter()
+        .any(|provenance| provenance.kind == "raw_event" && provenance.id == raw_event.id));
+    assert!(!envelope.provenance.iter().any(|provenance| {
+        provenance.kind == "continuation"
+            && stale
+                .iter()
+                .any(|continuation| continuation.id == provenance.id)
+    }));
+    let card = envelope.data.unwrap();
+    assert_eq!(card.stance, "grounded_recall");
+    assert!(card.active_continuations.is_empty());
+}
+
+#[tokio::test]
+async fn lens_endpoint_keeps_deferred_lexical_hits_as_living_pasts() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let deferred = create_continuation_with_status_via_api(
+        &app,
+        "deferred lexical living needle",
+        "still unresolved",
+        ContinuationType::Obligation,
+        ContinuationStatus::Deferred,
+    )
+    .await;
+
+    let response = app
+        .oneshot(json_request(
+            "POST",
+            "/v1/lens",
+            &LensRequest {
+                query: "deferred lexical living needle".to_string(),
+                horizon: Vec::new(),
+                perspective: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<LensCard> = read_json(response).await;
+    assert!(envelope.ok);
+    assert!(envelope
+        .provenance
+        .iter()
+        .any(|provenance| { provenance.kind == "continuation" && provenance.id == deferred.id }));
+    let card = envelope.data.unwrap();
+    assert_eq!(card.active_continuations.len(), 1);
+    assert_eq!(card.active_continuations[0].id, deferred.id);
+}
+
+#[tokio::test]
+async fn lens_endpoint_finds_living_lexical_hit_after_stale_result_limit() {
+    let tmp = tempdir().unwrap();
+    let store = open_test_store(tmp.path());
+    let app = tfk_api::router_with_store(store);
+    let query = "crowded living lexical needle";
+    for index in 0..20 {
+        create_continuation_with_status_via_api(
+            &app,
+            query,
+            &format!("closed stale lexical hit {index}"),
+            ContinuationType::Risk,
+            ContinuationStatus::Closed,
+        )
+        .await;
+    }
+    let active = create_continuation_with_status_via_api(
+        &app,
+        query,
+        "active living hit beyond stale search window",
+        ContinuationType::Obligation,
+        ContinuationStatus::Active,
+    )
+    .await;
+
+    let response = app
+        .oneshot(json_request(
+            "POST",
+            "/v1/lens",
+            &LensRequest {
+                query: query.to_string(),
+                horizon: Vec::new(),
+                perspective: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: ApiEnvelope<LensCard> = read_json(response).await;
+    assert!(envelope.ok);
+    assert!(envelope
+        .provenance
+        .iter()
+        .any(|provenance| provenance.kind == "continuation" && provenance.id == active.id));
+    let card = envelope.data.unwrap();
+    assert_eq!(card.active_continuations.len(), 1);
+    assert_eq!(card.active_continuations[0].id, active.id);
+}
+
+#[tokio::test]
 async fn preflight_endpoint_returns_confirmation_decision() {
     let tmp = tempdir().unwrap();
     let store = open_test_store(tmp.path());
