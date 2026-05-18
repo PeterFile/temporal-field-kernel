@@ -48,6 +48,10 @@ pub enum StdioCommand {
     Assimilate {
         request: Value,
     },
+    TemporalDeltaList,
+    TemporalDeltaGet {
+        id: String,
+    },
     ContinuationCreate {
         request: Value,
     },
@@ -74,6 +78,8 @@ impl StdioCommand {
             Self::Forecast { .. } => "forecast",
             Self::Commit { .. } => "commit",
             Self::Assimilate { .. } => "assimilate",
+            Self::TemporalDeltaList => "temporal_delta_list",
+            Self::TemporalDeltaGet { .. } => "temporal_delta_get",
             Self::ContinuationCreate { .. } => "continuation_create",
             Self::ContinuationList => "continuation_list",
             Self::ContinuationGet { .. } => "continuation_get",
@@ -176,6 +182,20 @@ pub fn daemon_request_for(command: &StdioCommand) -> anyhow::Result<DaemonReques
             path: "/v1/assimilate".to_string(),
             body: typed_request_body::<TemporalDeltaInput>(request, "assimilate")?,
         }),
+        StdioCommand::TemporalDeltaList => Ok(DaemonRequest {
+            method: "GET",
+            path: "/v1/temporal-deltas".to_string(),
+            body: Vec::new(),
+        }),
+        StdioCommand::TemporalDeltaGet { id } => {
+            let id = safe_path_id(id, "temporal delta id")?;
+
+            Ok(DaemonRequest {
+                method: "GET",
+                path: format!("/v1/temporal-deltas/{id}"),
+                body: Vec::new(),
+            })
+        }
         StdioCommand::ContinuationCreate { request } => Ok(DaemonRequest {
             method: "POST",
             path: "/v1/continuations".to_string(),
