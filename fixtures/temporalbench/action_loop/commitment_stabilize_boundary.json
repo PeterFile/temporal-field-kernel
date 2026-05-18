@@ -1,0 +1,67 @@
+{
+  "commitment": {
+    "speaker": "agent",
+    "statement": "stabilize the reversible operating rule once the evidence path is documented",
+    "scope": "temporalbench/action-loop/stabilize-boundary",
+    "deadline": "2026-05-10",
+    "revocable": true
+  },
+  "lens": {
+    "query": "reversible operating rule",
+    "horizon": ["next-action"],
+    "perspective": ["commitment", "lifecycle"]
+  },
+  "preflight": {
+    "uncertainty": 0.2,
+    "irreversibility": 0.1,
+    "externality": 0.1,
+    "option_value_loss": 0.0
+  },
+  "forecast": {
+    "actions": [
+      {
+        "name": "record stable operating rule",
+        "continuation_id": null,
+        "progress": 0.75,
+        "closure": 0.65,
+        "option_value_preserved": 0.85,
+        "risk": 0.1,
+        "irreversibility": 0.0,
+        "confusion": 0.1,
+        "friction": 0.1,
+        "temporal_debt_added": 0.0,
+        "uncertainty": 0.15,
+        "externality": 0.1
+      },
+      {
+        "name": "reopen operating rule debate",
+        "continuation_id": null,
+        "progress": 0.35,
+        "closure": 0.15,
+        "option_value_preserved": 0.4,
+        "risk": 0.25,
+        "irreversibility": 0.1,
+        "confusion": 0.4,
+        "friction": 0.3,
+        "temporal_debt_added": 0.3,
+        "uncertainty": 0.45,
+        "externality": 0.2
+      }
+    ],
+    "relations": []
+  },
+  "assimilation": {
+    "action_id": "record stable operating rule",
+    "delta": "stabilize"
+  },
+  "expected": {
+    "commitment_constraint_count": 1,
+    "active_pressure_count_before_assimilate": 1,
+    "preflight_requires_confirmation": false,
+    "forecast_top_action": "record stable operating rule",
+    "assimilated_status": "stabilized",
+    "reopened_status": "stabilized",
+    "commitment_constraint_count_after_assimilate": 0,
+    "active_pressure_count_after_assimilate": 0
+  }
+}
