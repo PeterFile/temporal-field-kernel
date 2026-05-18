@@ -355,6 +355,59 @@ fn commitment_list_command_maps_to_daemon_commitments_get() {
     assert!(request.body.is_empty());
 }
 
+#[test]
+fn advisory_forecast_signal_list_command_maps_to_daemon_get() {
+    let command = parse_command_line(r#"{"command":"advisory_forecast_signal_list"}"#).unwrap();
+    let request = daemon_request_for(&command).unwrap();
+
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/v1/advisory-forecast-signals");
+    assert!(request.body.is_empty());
+}
+
+#[test]
+fn advisory_forecast_signal_get_command_maps_to_daemon_get() {
+    let command = parse_command_line(
+        r#"{"command":"advisory_forecast_signal_get","id":"advisory_signal_ABC-123"}"#,
+    )
+    .unwrap();
+    let request = daemon_request_for(&command).unwrap();
+
+    assert_eq!(request.method, "GET");
+    assert_eq!(
+        request.path,
+        "/v1/advisory-forecast-signals/advisory_signal_ABC-123"
+    );
+    assert!(request.body.is_empty());
+}
+
+#[test]
+fn advisory_forecast_signal_get_rejects_unsafe_path_ids() {
+    for bad_id in [
+        "",
+        "advisory/signal",
+        "advisory\rheader",
+        "advisory\nheader",
+        "advisory?query",
+        "advisory%2Fsignal",
+    ] {
+        let command = parse_command_line(
+            &json!({
+                "command": "advisory_forecast_signal_get",
+                "id": bad_id,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let error = daemon_request_for(&command).unwrap_err().to_string();
+
+        assert!(
+            error.contains("advisory forecast signal id"),
+            "unexpected error for {bad_id:?}: {error}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn malformed_action_loop_request_returns_command_error_without_daemon() {
     let command =
