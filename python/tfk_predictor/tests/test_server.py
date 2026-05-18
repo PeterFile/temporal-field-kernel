@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+import tomllib
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -11,6 +12,7 @@ from tfk_predictor.server import handle
 
 RIVER_MODEL = "tfk-river-sidecar-v0"
 HEURISTIC_MODEL = "tfk-heuristic-sidecar-v0"
+PYPROJECT = pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 
 def candidate_action(**overrides):
@@ -33,6 +35,19 @@ def candidate_action(**overrides):
 
 
 class ServerHandleTests(unittest.TestCase):
+    def test_river_is_optional_packaging_dependency(self):
+        pyproject = tomllib.loads(PYPROJECT.read_text())
+        dependencies = pyproject["project"]["dependencies"]
+        self.assertIn("optional-dependencies", pyproject["project"])
+        optional_dependencies = pyproject["project"]["optional-dependencies"]
+
+        self.assertIn("pydantic>=2", dependencies)
+        self.assertFalse(
+            any(dependency.startswith("river") for dependency in dependencies)
+        )
+        self.assertIn("river", optional_dependencies)
+        self.assertIn("river>=0.22", optional_dependencies["river"])
+
     def assert_sidecar_model_status(self, response, signal):
         self.assertIn(signal["model"], {RIVER_MODEL, HEURISTIC_MODEL})
         if signal["model"] == HEURISTIC_MODEL:
