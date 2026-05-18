@@ -64,6 +64,10 @@ pub enum StdioCommand {
     },
     RelationList,
     CommitmentList,
+    AdvisoryForecastSignalList,
+    AdvisoryForecastSignalGet {
+        id: String,
+    },
 }
 
 impl StdioCommand {
@@ -86,6 +90,8 @@ impl StdioCommand {
             Self::RelationCreate { .. } => "relation_create",
             Self::RelationList => "relation_list",
             Self::CommitmentList => "commitment_list",
+            Self::AdvisoryForecastSignalList => "advisory_forecast_signal_list",
+            Self::AdvisoryForecastSignalGet { .. } => "advisory_forecast_signal_get",
         }
     }
 }
@@ -230,6 +236,20 @@ pub fn daemon_request_for(command: &StdioCommand) -> anyhow::Result<DaemonReques
             path: "/v1/commitments".to_string(),
             body: Vec::new(),
         }),
+        StdioCommand::AdvisoryForecastSignalList => Ok(DaemonRequest {
+            method: "GET",
+            path: "/v1/advisory-forecast-signals".to_string(),
+            body: Vec::new(),
+        }),
+        StdioCommand::AdvisoryForecastSignalGet { id } => {
+            let id = safe_path_id(id, "advisory forecast signal id")?;
+
+            Ok(DaemonRequest {
+                method: "GET",
+                path: format!("/v1/advisory-forecast-signals/{id}"),
+                body: Vec::new(),
+            })
+        }
     }
 }
 

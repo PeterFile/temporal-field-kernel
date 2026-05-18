@@ -173,9 +173,21 @@ Accepts `ForecastRequest` and returns deterministic ranked actions. If candidate
 
 Returns `ApiEnvelope<Vec<StoredAdvisoryForecastSignal>>` for persisted advisory forecast signals, ordered by creation time. This read path exposes the stored signal id, name, confidence, model, optional action name, optional reason, and creation timestamp. There is no pagination or filtering in this slice.
 
+MCP wrapper example:
+
+```text
+{"command":"advisory_forecast_signal_list"}
+```
+
 ### GET /v1/advisory-forecast-signals/:id
 
 Returns `ApiEnvelope<StoredAdvisoryForecastSignal>` for one persisted advisory forecast signal, or a 404 envelope when the id is missing.
+
+MCP wrapper example:
+
+```text
+{"command":"advisory_forecast_signal_get","id":"advisory_signal_..."}
+```
 
 When the optional forecast sidecar reports `degraded: true`, `/v1/forecast` still returns HTTP 200 with the deterministic ranked actions and surfaces the sidecar reason in the envelope `warnings`.
 
