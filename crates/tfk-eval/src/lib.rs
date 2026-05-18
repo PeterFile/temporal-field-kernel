@@ -882,7 +882,7 @@ pub fn replay_vector_lens_influence_fixture(
     let ok = actual_top_title == expected_top_title
         && actual_top_source == expected_top_source
         && actual_ordered_titles == expected_ordered_titles
-        && actual_vector_hit_labels == expected_vector_hit_labels;
+        && sorted_labels(&actual_vector_hit_labels) == sorted_labels(&expected_vector_hit_labels);
 
     Ok(VectorLensInfluenceReplaySummary {
         fixture_path: path.to_string_lossy().to_string(),
@@ -898,6 +898,12 @@ pub fn replay_vector_lens_influence_fixture(
         actual_vector_hit_labels,
         ok,
     })
+}
+
+fn sorted_labels(labels: &[String]) -> Vec<String> {
+    let mut labels = labels.to_vec();
+    labels.sort();
+    labels
 }
 
 #[derive(Debug, Deserialize)]

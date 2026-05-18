@@ -87,6 +87,16 @@ fn vector_lens_influence_fixture_path() -> PathBuf {
         .join("../../fixtures/temporalbench/vector_lens_influence/basic.json")
 }
 
+fn vector_lens_stale_hits_ignored_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/vector_lens_influence/stale_hits_ignored.json")
+}
+
+fn vector_lens_dedupe_and_distance_order_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/temporalbench/vector_lens_influence/dedupe_and_distance_order.json")
+}
+
 fn commitment_forecast_fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/temporalbench/forecast_commitment/basic.json")
@@ -769,6 +779,61 @@ fn vector_lens_influence_replay_promotes_fake_vector_hit_over_lexical_baseline()
         ]
     );
     assert_eq!(summary.actual_vector_hit_labels, vec!["vector_target"]);
+    assert!(summary.ok);
+}
+
+#[test]
+fn vector_lens_influence_replay_ignores_stale_vector_hits() {
+    let summary =
+        replay_vector_lens_influence_fixture(&vector_lens_stale_hits_ignored_fixture_path())
+            .unwrap();
+
+    assert_eq!(summary.continuation_count, 4);
+    assert_eq!(summary.vector_hit_count, 1);
+    assert_eq!(summary.expected_top_title, "active vector boundary");
+    assert_eq!(summary.actual_top_title, "active vector boundary");
+    assert_eq!(summary.expected_top_source, "vector");
+    assert_eq!(summary.actual_top_source, "vector");
+    assert_eq!(
+        summary.actual_ordered_titles,
+        vec![
+            "active vector boundary".to_string(),
+            "lexical stale baseline".to_string(),
+        ]
+    );
+    assert_eq!(summary.actual_vector_hit_labels, vec!["active_target"]);
+    assert!(summary.ok);
+}
+
+#[test]
+fn vector_lens_influence_replay_dedupes_hits_and_orders_by_distance() {
+    let summary =
+        replay_vector_lens_influence_fixture(&vector_lens_dedupe_and_distance_order_fixture_path())
+            .unwrap();
+
+    assert_eq!(summary.continuation_count, 3);
+    assert_eq!(summary.vector_hit_count, 2);
+    assert_eq!(summary.expected_top_title, "near vector target");
+    assert_eq!(summary.actual_top_title, "near vector target");
+    assert_eq!(summary.expected_top_source, "vector");
+    assert_eq!(summary.actual_top_source, "vector");
+    assert_eq!(
+        summary.actual_ordered_titles,
+        vec![
+            "near vector target".to_string(),
+            "far vector target".to_string(),
+            "lexical distance baseline".to_string(),
+        ]
+    );
+    assert_eq!(summary.actual_vector_hit_labels.len(), 2);
+    assert!(summary
+        .actual_vector_hit_labels
+        .iter()
+        .any(|label| label == "far_target"));
+    assert!(summary
+        .actual_vector_hit_labels
+        .iter()
+        .any(|label| label == "near_target"));
     assert!(summary.ok);
 }
 

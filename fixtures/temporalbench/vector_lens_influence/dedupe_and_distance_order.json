@@ -1,0 +1,66 @@
+{
+  "continuations": [
+    {
+      "label": "lexical_baseline",
+      "input": {
+        "title": "lexical distance baseline",
+        "summary": "distance vector order phrase kept active only as a lexical baseline",
+        "continuation_type": "narrative",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "far_target",
+      "input": {
+        "title": "far vector target",
+        "summary": "farther safety boundary supplied only by vector influence",
+        "continuation_type": "risk",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "near_target",
+      "input": {
+        "title": "near vector target",
+        "summary": "nearer safety boundary supplied only by vector influence",
+        "continuation_type": "risk",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    }
+  ],
+  "lens": {
+    "query": "distance vector order",
+    "horizon": ["next-action"],
+    "perspective": ["safety"]
+  },
+  "fake_vector_hits": [
+    {
+      "label": "far_target",
+      "distance": 0.2
+    },
+    {
+      "label": "far_target",
+      "distance": 0.25
+    },
+    {
+      "label": "near_target",
+      "distance": 0.0
+    }
+  ],
+  "expected": {
+    "top_title": "near vector target",
+    "top_source": "vector",
+    "ordered_titles": [
+      "near vector target",
+      "far vector target",
+      "lexical distance baseline"
+    ],
+    "vector_hit_labels": ["far_target", "near_target"]
+  }
+}
