@@ -197,6 +197,47 @@ fn raw_event_get_rejects_unsafe_path_ids() {
 }
 
 #[test]
+fn temporal_delta_list_command_maps_to_daemon_temporal_deltas_get() {
+    let command = parse_command_line(r#"{"command":"temporal_delta_list"}"#).unwrap();
+    let request = daemon_request_for(&command).unwrap();
+
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/v1/temporal-deltas");
+    assert!(request.body.is_empty());
+}
+
+#[test]
+fn temporal_delta_get_command_maps_to_daemon_temporal_delta_get() {
+    let command =
+        parse_command_line(r#"{"command":"temporal_delta_get","id":"td_ABC-123"}"#).unwrap();
+    let request = daemon_request_for(&command).unwrap();
+
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/v1/temporal-deltas/td_ABC-123");
+    assert!(request.body.is_empty());
+}
+
+#[test]
+fn temporal_delta_get_rejects_unsafe_path_ids() {
+    for bad_id in ["", "td/a", "td\rheader", "td\nheader", "td?query"] {
+        let command = parse_command_line(
+            &json!({
+                "command": "temporal_delta_get",
+                "id": bad_id,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let error = daemon_request_for(&command).unwrap_err().to_string();
+
+        assert!(
+            error.contains("temporal delta id"),
+            "unexpected error for {bad_id:?}: {error}"
+        );
+    }
+}
+
+#[test]
 fn continuation_create_command_maps_to_daemon_continuations_post() {
     let command = parse_command_line(
         &json!({

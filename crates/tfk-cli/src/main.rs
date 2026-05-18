@@ -87,6 +87,11 @@ enum Command {
         #[command(subcommand)]
         command: AdvisoryForecastSignalCommand,
     },
+    /// List or get persisted temporal deltas through the local tfkd daemon.
+    TemporalDelta {
+        #[command(subcommand)]
+        command: TemporalDeltaCommand,
+    },
     /// Apply an action-loop temporal delta through the local tfkd daemon.
     Assimilate {
         #[arg(long)]
@@ -176,6 +181,14 @@ enum AdvisoryForecastSignalCommand {
     /// List advisory forecast signals.
     List,
     /// Get one advisory forecast signal.
+    Get { id: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum TemporalDeltaCommand {
+    /// List persisted temporal deltas.
+    List,
+    /// Get one persisted temporal delta.
     Get { id: String },
 }
 
@@ -348,6 +361,19 @@ async fn main() -> anyhow::Result<()> {
                 print_json(&response)?;
             }
         },
+        Command::TemporalDelta { command } => match command {
+            TemporalDeltaCommand::List => {
+                let response =
+                    tfk_cli::request_over_uds(&socket_path, "GET", temporal_deltas_endpoint(), b"")
+                        .await?;
+                print_json(&response)?;
+            }
+            TemporalDeltaCommand::Get { id } => {
+                let path = temporal_delta_get_path(&id)?;
+                let response = tfk_cli::request_over_uds(&socket_path, "GET", &path, b"").await?;
+                print_json(&response)?;
+            }
+        },
         Command::Assimilate { json_file } => {
             let body = json_file_body::<TemporalDeltaInput>(&json_file)?;
             let response =
@@ -394,6 +420,10 @@ fn advisory_forecast_signal_get_path(id: &str) -> anyhow::Result<String> {
         id,
         "advisory forecast signal id",
     )
+}
+
+fn temporal_delta_get_path(id: &str) -> anyhow::Result<String> {
+    resource_get_path(temporal_deltas_endpoint(), id, "temporal delta id")
 }
 
 fn resource_get_path(base_path: &str, id: &str, label: &str) -> anyhow::Result<String> {
@@ -561,6 +591,10 @@ fn forecast_endpoint() -> &'static str {
 
 fn advisory_forecast_signals_endpoint() -> &'static str {
     "/v1/advisory-forecast-signals"
+}
+
+fn temporal_deltas_endpoint() -> &'static str {
+    "/v1/temporal-deltas"
 }
 
 fn assimilate_endpoint() -> &'static str {
@@ -1151,6 +1185,65 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_temporal_delta_list_command() {
+        let cli = Cli::parse_from(["tfk", "temporal-delta", "list"]);
+
+        assert!(matches!(
+            cli.command,
+            Command::TemporalDelta {
+                command: TemporalDeltaCommand::List
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_temporal_delta_get_command() {
+        let cli = Cli::parse_from(["tfk", "temporal-delta", "get", "td_abc-123"]);
+
+        match cli.command {
+            Command::TemporalDelta {
+                command: TemporalDeltaCommand::Get { id },
+            } => assert_eq!(id, "td_abc-123"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn temporal_delta_get_path_allows_safe_ascii_id() {
+        let path = temporal_delta_get_path("td_ABC-123").unwrap();
+
+        assert_eq!(path, "/v1/temporal-deltas/td_ABC-123");
+    }
+
+    #[test]
+    fn temporal_delta_get_path_rejects_request_line_and_path_injection() {
+        for id in [
+            "",
+            "td\r\nX-Bad: true",
+            "td\nX-Bad: true",
+            "td/../other",
+            "td%2Fother",
+            "td?query=other",
+        ] {
+            let error = temporal_delta_get_path(id).unwrap_err();
+
+            assert!(
+                error.to_string().contains("invalid temporal delta id"),
+                "unexpected error for {id:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn temporal_delta_endpoint_paths_are_stable() {
+        assert_eq!(temporal_deltas_endpoint(), "/v1/temporal-deltas");
+        assert_eq!(
+            temporal_delta_get_path("td_123").unwrap(),
+            "/v1/temporal-deltas/td_123"
+        );
     }
 
     #[test]

@@ -218,6 +218,20 @@ Lifecycle coupling:
 
 Returns `ApiEnvelope<Vec<StoredTemporalDelta>>` for persisted temporal delta evidence, ordered by creation time and id. Each item exposes the stored delta id, originating `action_id`, serialized `changes_json`, `claims_json`, `evidence_json`, and creation timestamp. There is no pagination or filtering in this slice.
 
+CLI and MCP wrapper examples:
+
+```text
+tfk temporal-delta list
+{"command":"temporal_delta_list"}
+```
+
 ### GET /v1/temporal-deltas/:id
 
 Returns `ApiEnvelope<StoredTemporalDelta>` for one persisted temporal delta, or a 404 envelope when the id is missing.
+
+CLI and MCP wrapper examples:
+
+```text
+tfk temporal-delta get td_...
+{"command":"temporal_delta_get","id":"td_..."}
+```
