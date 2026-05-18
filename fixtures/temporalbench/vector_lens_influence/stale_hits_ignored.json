@@ -1,0 +1,76 @@
+{
+  "continuations": [
+    {
+      "label": "lexical_baseline",
+      "input": {
+        "title": "lexical stale baseline",
+        "summary": "stale vector recall phrase kept active only as a lexical baseline",
+        "continuation_type": "narrative",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "closed_target",
+      "input": {
+        "title": "closed vector boundary",
+        "summary": "closed continuation returned by a stale vector index must not reappear",
+        "continuation_type": "risk",
+        "status": "closed",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "retired_target",
+      "input": {
+        "title": "retired vector boundary",
+        "summary": "retired continuation returned by a stale vector index must not reappear",
+        "continuation_type": "risk",
+        "status": "retired",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    },
+    {
+      "label": "active_target",
+      "input": {
+        "title": "active vector boundary",
+        "summary": "current safety boundary supplied only by the vector backend",
+        "continuation_type": "risk",
+        "status": "active",
+        "parent_id": null,
+        "raw_event_id": null
+      }
+    }
+  ],
+  "lens": {
+    "query": "stale vector recall",
+    "horizon": ["next-action"],
+    "perspective": ["safety"]
+  },
+  "fake_vector_hits": [
+    {
+      "label": "closed_target",
+      "distance": 0.0
+    },
+    {
+      "label": "retired_target",
+      "distance": 0.01
+    },
+    {
+      "label": "active_target",
+      "distance": 0.02
+    }
+  ],
+  "expected": {
+    "top_title": "active vector boundary",
+    "top_source": "vector",
+    "ordered_titles": [
+      "active vector boundary",
+      "lexical stale baseline"
+    ],
+    "vector_hit_labels": ["active_target"]
+  }
+}
